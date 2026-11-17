@@ -6,8 +6,21 @@ import type { PlatformUpdateInfo, PlatformUpdaterService } from './platformUpdat
 import databaseAPI from './shared/database.js'
 import windowManager from '../managers/windowManager'
 import { applyWindowMaterial, getDefaultWindowMaterial } from '../utils/windowUtils.js'
-import { isInAppUpdateSource } from '../../shared/updateSource'
-import { fetchLatestServerUpdate, resolvePlatformUpdateInfo } from './serverUpdateCatalog'
+import {
+  compareSemverVersions,
+  FORK_GITHUB_LATEST_RELEASE_URL,
+  FORK_OWNER,
+  FORK_REPO,
+  getForkReleaseFeedUrl,
+  GITHUB_LATEST_RELEASE_URL,
+  isInAppUpdateSource,
+  type ForkUpdateAnalysis,
+  type UpdateOrigin,
+  type UpdatePreferences
+} from '../../shared/updateSource'
+import { HOST_STORAGE_KEYS } from '../../shared/storageKeys'
+import { resolveUpdateChannel } from '../../shared/updateChannel'
+import { checkForkAndOfficialUpdates, type CombinedUpdateCheckResult } from './forkUpdateAnalyzer'
 
 const AUTO_CHECK_INTERVAL_MS = 30 * 60 * 1000
 
@@ -22,6 +35,7 @@ export class UpdaterAPI {
   private autoCheckTimer: NodeJS.Timeout | null = null
   private autoCheckEnabled = false
   private autoCheckInFlight = false
+  private latestAnalysis: ForkUpdateAnalysis | null = null
 
   /**
    * 初始化平台更新服务并注册更新窗口使用的 IPC。
@@ -81,11 +95,19 @@ export class UpdaterAPI {
       this.startUpdate(sourceID)
     )
     ipcMain.handle('updater:cancel-update', () => this.cancelUpdate())
+    ipcMain.handle('updater:reset-download-state', () => this.resetDownloadState())
     ipcMain.handle('updater:open-download-source', (_event, sourceID: number) =>
       this.openDownloadSource(sourceID)
     )
     ipcMain.handle('updater:install-downloaded-update', () => this.installDownloadedUpdate())
     ipcMain.handle('updater:get-download-status', () => this.getDownloadStatus())
+    ipcMain.handle('updater:get-preferences', () => this.getUpdatePreferences())
+    ipcMain.handle('updater:set-preferences', (_event, prefs: Partial<UpdatePreferences>) =>
+      this.setUpdatePreferences(prefs)
+    )
+    ipcMain.handle('updater:analyze-fork-update', (_event, forceRefresh?: boolean) =>
+      this.analyzeForkUpdate(forceRefresh)
+    )
 
     ipcMain.on('updater:quit-and-install', () => void this.installDownloadedUpdate())
     ipcMain.on('updater:minimize-window', () => this.minimizeUpdateWindow())
@@ -95,10 +117,186 @@ export class UpdaterAPI {
       if (this.updateWindow && info) {
         this.updateWindow.webContents.send('update-info', {
           ...info,
+          currentVersion: info.currentVersion ?? app.getVersion(),
+          forkAnalysis: info.forkAnalysis ?? this.latestAnalysis ?? undefined,
+          preferences: this.getUpdatePreferences(),
           downloadStatus: this.getDownloadStatus()
         })
       }
     })
+  }
+
+  /**
+   * 判断当前设备配置是否订阅 Beta 更新通道。
+   * @returns 当前是否应包含预发布版本。
+   */
+  private shouldIncludePrerelease(): boolean {
+    try {
+      const settings = databaseAPI.dbGet(HOST_STORAGE_KEYS.settingsGeneral)
+      return (
+        resolveUpdateChannel(app.getVersion(), settings?.receiveBetaUpdates === true) === 'beta'
+      )
+    } catch {
+      return resolveUpdateChannel(app.getVersion()) === 'beta'
+    }
+  }
+
+  /**
+   * 读取当前设备的更新偏好设置，未配置时默认优先使用“我的源”。
+   * @returns 更新源偏好及是否关闭官方新版本提示的状态。
+   */
+  public getUpdatePreferences(): UpdatePreferences {
+    const settings = databaseAPI.dbGet(HOST_STORAGE_KEYS.settingsGeneral)
+    return {
+      preferredUpdateSource: settings?.preferredUpdateSource === 'official' ? 'official' : 'mine',
+      ignoreOfficialUpdateNotice: settings?.ignoreOfficialUpdateNotice === true
+    }
+  }
+
+  /**
+   * 更新并持久化应用更新偏好设置，同步通知主窗口与更新窗口刷新展示状态。
+   * @param patch 需要修改的更新偏好字段。
+   * @returns 合并持久化后的最新更新偏好配置。
+   */
+  public setUpdatePreferences(patch: Partial<UpdatePreferences>): UpdatePreferences {
+    const existing = databaseAPI.dbGet(HOST_STORAGE_KEYS.settingsGeneral) || {}
+    const current = this.getUpdatePreferences()
+    const nextPrefs: UpdatePreferences = {
+      preferredUpdateSource:
+        patch.preferredUpdateSource === 'official' || patch.preferredUpdateSource === 'mine'
+          ? patch.preferredUpdateSource
+          : current.preferredUpdateSource,
+      ignoreOfficialUpdateNotice:
+        typeof patch.ignoreOfficialUpdateNotice === 'boolean'
+          ? patch.ignoreOfficialUpdateNotice
+          : current.ignoreOfficialUpdateNotice
+    }
+
+    // 持久化到通用设置，保证重启后仍记住用户偏好。
+    databaseAPI.dbPut?.(HOST_STORAGE_KEYS.settingsGeneral, {
+      ...existing,
+      preferredUpdateSource: nextPrefs.preferredUpdateSource,
+      ignoreOfficialUpdateNotice: nextPrefs.ignoreOfficialUpdateNotice
+    })
+
+    // 若关闭官方新版本提示，清理仅针对官方源的可用更新缓存，避免主窗口再次弹出。
+    if (nextPrefs.ignoreOfficialUpdateNotice && this.availableUpdateInfo?.origin === 'official') {
+      this.availableUpdateInfo = null
+    }
+
+    this.sendUpdateEvent('update-preferences-changed', nextPrefs)
+    return nextPrefs
+  }
+
+  /**
+   * 清理当前已下载或失败的更新器缓存，确保用户在更新弹窗切换源后能直接发起新下载。
+   * @returns 重置结果及重置后的下载状态摘要。
+   */
+  public resetDownloadState(): {
+    success: boolean
+    status: ReturnType<UpdaterAPI['getDownloadStatus']>
+  } {
+    this.downloadedUpdateInfo = null
+    this.platformUpdater?.resetDownloadState?.()
+    this.sendUpdateEvent('update-download-cancelled', undefined)
+    return {
+      success: true,
+      status: this.getDownloadStatus()
+    }
+  }
+
+  /**
+   * 获取或刷新当前仓库与“我的源”“官方源”之间的版本差距及合并影响评估。
+   * @param forceRefresh 为 true 时跳过短时缓存重新拉取远端数据。
+   * @returns 完整的双源对比与合并影响分析结果。
+   */
+  public async analyzeForkUpdate(forceRefresh = false): Promise<ForkUpdateAnalysis> {
+    if (
+      !forceRefresh &&
+      this.latestAnalysis &&
+      Date.now() - this.latestAnalysis.checkedAt < 60_000
+    ) {
+      return this.latestAnalysis
+    }
+    const prefs = this.getUpdatePreferences()
+    const combined = await checkForkAndOfficialUpdates(
+      prefs.preferredUpdateSource,
+      this.shouldIncludePrerelease()
+    )
+    this.latestAnalysis = combined.analysis
+    return combined.analysis
+  }
+
+  /**
+   * 根据双源检测结果和用户偏好，构建本次应当提示的平台更新载荷。
+   * @param combined 双源版本检测及合并影响评估结果。
+   * @param prefs 当前设备的更新偏好配置。
+   * @returns 存在需要提示的新版本时返回更新载荷，否则返回 null。
+   */
+  private resolvePrimaryUpdateInfo(
+    combined: CombinedUpdateCheckResult,
+    prefs: UpdatePreferences
+  ): PlatformUpdateInfo | null {
+    const { analysis, myRelease, officialPlatformInfo, mergedSources } = combined
+    const myHasUpdate = analysis.mySource.hasUpdate && Boolean(myRelease.latestVersion)
+    const officialHasUpdate =
+      !prefs.ignoreOfficialUpdateNotice &&
+      analysis.officialSource.hasNewerThanBase &&
+      Boolean(analysis.officialSource.latestVersion)
+
+    if (!myHasUpdate && !officialHasUpdate) {
+      return null
+    }
+
+    // 默认优先采用我的源；仅在用户偏好官方源且官方有新版本，或我的源暂无新版本时才主推官方源。
+    const useOfficialAsPrimary =
+      (prefs.preferredUpdateSource === 'official' && officialHasUpdate) || !myHasUpdate
+
+    if (!useOfficialAsPrimary && myRelease.latestVersion) {
+      return {
+        version: myRelease.latestVersion,
+        currentVersion: analysis.currentVersion,
+        changelog:
+          myRelease.changelog ||
+          `### 我的源 (${FORK_OWNER}/${FORK_REPO}) v${myRelease.latestVersion}`,
+        releaseUrl: myRelease.releaseUrl || FORK_GITHUB_LATEST_RELEASE_URL,
+        downloadUrl: myRelease.assetUrl || myRelease.releaseUrl,
+        feedUrl: getForkReleaseFeedUrl(myRelease.latestVersion),
+        manualDownloadRequired: false,
+        origin: 'mine',
+        preferredOrigin: 'mine',
+        sources: mergedSources,
+        forkAnalysis: analysis
+      }
+    }
+
+    const officialVersion =
+      officialPlatformInfo?.version ?? analysis.officialSource.latestVersion ?? ''
+    const officialChangelog =
+      officialPlatformInfo?.changelog ||
+      analysis.officialSource.changelog ||
+      `### 官方源 v${officialVersion}`
+    const officialReleaseUrl =
+      officialPlatformInfo?.releaseUrl ||
+      analysis.officialSource.releaseUrl ||
+      GITHUB_LATEST_RELEASE_URL
+    const hasInAppOfficialSource = mergedSources.some(
+      (source) => source.origin === 'official' && isInAppUpdateSource(source)
+    )
+
+    return {
+      ...(officialPlatformInfo ?? {}),
+      version: officialVersion,
+      currentVersion: analysis.currentVersion,
+      changelog: officialChangelog,
+      releaseUrl: officialReleaseUrl,
+      manualDownloadRequired:
+        officialPlatformInfo?.manualDownloadRequired ?? !hasInAppOfficialSource,
+      origin: 'official',
+      preferredOrigin: 'official',
+      sources: mergedSources,
+      forkAnalysis: analysis
+    }
   }
 
   /**
@@ -130,17 +328,24 @@ export class UpdaterAPI {
     if (!this.autoCheckEnabled || this.autoCheckInFlight) return
     this.autoCheckInFlight = true
     try {
-      const update = await fetchLatestServerUpdate()
-      if (
-        !this.autoCheckEnabled ||
-        !update?.available ||
-        update.latestVersion === this.lastAutoNotifiedVersion
+      const prefs = this.getUpdatePreferences()
+      const combined = await checkForkAndOfficialUpdates(
+        prefs.preferredUpdateSource,
+        this.shouldIncludePrerelease()
       )
-        return
-      const info = await resolvePlatformUpdateInfo(update)
-      // 请求期间关闭自动检查后，不再展示提示。
+      this.latestAnalysis = combined.analysis
       if (!this.autoCheckEnabled) return
-      this.lastAutoNotifiedVersion = info.version
+
+      const info = this.resolvePrimaryUpdateInfo(combined, prefs)
+      const notifyKey = info ? `${info.origin ?? 'official'}:${info.version}` : ''
+      if (!info || notifyKey === this.lastAutoNotifiedVersion) return
+
+      // 请求期间若偏好发生变更（如勾选了关闭官方新版本提示），不再弹出旧官方通知。
+      const latestPrefs = this.getUpdatePreferences()
+      if (!this.autoCheckEnabled) return
+      if (info.origin === 'official' && latestPrefs.ignoreOfficialUpdateNotice) return
+
+      this.lastAutoNotifiedVersion = notifyKey
       this.showAvailableUpdate(info)
     } catch (error) {
       console.error('[Updater] 自动检查更新失败:', error)
@@ -151,6 +356,8 @@ export class UpdaterAPI {
 
   private getDownloadStatus(): ReturnType<PlatformUpdaterService['getDownloadStatus']> & {
     hasUpdate: boolean
+    origin?: UpdateOrigin
+    currentVersion?: string
   } {
     const status = this.platformUpdater?.getDownloadStatus() ?? {
       hasDownloaded: false,
@@ -160,6 +367,8 @@ export class UpdaterAPI {
     return {
       ...status,
       hasUpdate: Boolean(info),
+      origin: info?.origin,
+      currentVersion: info?.currentVersion ?? app.getVersion(),
       version: status.version ?? info?.version,
       changelog: status.changelog ?? info?.changelog,
       status: status.hasDownloaded ? 'downloaded' : info ? 'available' : status.status
@@ -197,33 +406,64 @@ export class UpdaterAPI {
   public async checkUpdate(): Promise<
     Awaited<ReturnType<PlatformUpdaterService['checkForUpdates']>>
   > {
+    const currentVersion = app.getVersion()
     try {
-      const update = await fetchLatestServerUpdate()
-      if (!update?.available) {
+      const prefs = this.getUpdatePreferences()
+      const combined = await checkForkAndOfficialUpdates(
+        prefs.preferredUpdateSource,
+        this.shouldIncludePrerelease()
+      )
+      this.latestAnalysis = combined.analysis
+
+      // 两个更新源均未获取到任何版本信息时，按检查失败处理。
+      if (
+        !combined.myRelease.latestVersion &&
+        !combined.officialServerUpdate &&
+        !combined.analysis.officialSource.latestVersion
+      ) {
+        return {
+          success: false,
+          status: 'error',
+          hasUpdate: false,
+          currentVersion,
+          forkAnalysis: combined.analysis,
+          error:
+            combined.myRelease.error || combined.analysis.officialSource.error || '检查更新失败'
+        }
+      }
+
+      const info = this.resolvePrimaryUpdateInfo(combined, prefs)
+      if (!info) {
         return {
           success: true,
           status: 'not-available',
           hasUpdate: false,
-          currentVersion: app.getVersion(),
-          latestVersion: update?.latestVersion
+          currentVersion,
+          latestVersion:
+            combined.myRelease.latestVersion ??
+            combined.officialServerUpdate?.latestVersion ??
+            combined.analysis.officialSource.latestVersion ??
+            undefined,
+          forkAnalysis: combined.analysis
         }
       }
-      const info = await resolvePlatformUpdateInfo(update)
+
       this.showAvailableUpdate(info)
       return {
         success: true,
         status: 'available',
         hasUpdate: true,
-        currentVersion: app.getVersion(),
+        currentVersion,
         latestVersion: info.version,
-        updateInfo: info
+        updateInfo: info,
+        forkAnalysis: combined.analysis
       }
     } catch (error) {
       return {
         success: false,
         status: 'error',
         hasUpdate: false,
-        currentVersion: app.getVersion(),
+        currentVersion,
         error: error instanceof Error ? error.message : '检查更新失败'
       }
     }
@@ -237,13 +477,14 @@ export class UpdaterAPI {
   public async startUpdate(sourceID?: number): Promise<{
     success: boolean
     cancelled?: boolean
+    openedExternal?: boolean
     migrationRequired?: boolean
     error?: string
   }> {
     const updateInfo = this.availableUpdateInfo ?? this.downloadedUpdateInfo
     if (!updateInfo) return { success: false, error: '没有可用的更新' }
 
-    // 渠道由服务端下发，手动渠道无需初始化安装器即可跳转浏览器。
+    // 渠道由服务端或“我的源”组合下发，手动渠道无需初始化安装器即可跳转浏览器。
     const selectedSource =
       typeof sourceID === 'number'
         ? updateInfo.sources?.find((source) => source.id === sourceID)
@@ -251,6 +492,20 @@ export class UpdaterAPI {
     if (typeof sourceID === 'number' && !selectedSource) {
       return { success: false, error: '下载渠道不存在' }
     }
+
+    // 防止在我的源尚无更高版本时误下载同版本或旧版本。
+    const currentVersion = app.getVersion()
+    if (
+      selectedSource?.origin === 'mine' &&
+      selectedSource.version &&
+      compareSemverVersions(selectedSource.version, currentVersion) <= 0
+    ) {
+      return {
+        success: false,
+        error: `我的源当前 v${selectedSource.version} 已是最新版本，如需更新官方版本请切换至官方源`
+      }
+    }
+
     if (selectedSource && !isInAppUpdateSource(selectedSource)) {
       return this.openDownloadSource(selectedSource.id)
     }
@@ -264,11 +519,15 @@ export class UpdaterAPI {
     if (!app.isPackaged) return this.rejectDevelopmentUpdate()
     await this.initializationPromise
     if (!this.platformUpdater) return { success: false, error: '更新器尚未初始化' }
-    const selectedUpdateInfo = selectedSource
+    const selectedUpdateInfo: PlatformUpdateInfo = selectedSource
       ? {
           ...updateInfo,
+          version: selectedSource.version ?? updateInfo.version,
+          changelog: selectedSource.changelog ?? updateInfo.changelog,
           downloadUrl: selectedSource.downloadUrl,
           feedUrl: selectedSource.feedUrl,
+          releaseUrl: selectedSource.releaseUrl ?? updateInfo.releaseUrl,
+          origin: selectedSource.origin ?? updateInfo.origin,
           manualDownloadRequired: false
         }
       : updateInfo
@@ -290,13 +549,13 @@ export class UpdaterAPI {
   }
 
   /**
-   * 使用系统浏览器打开当前版本中已由服务端登记的下载源。
-   * @param sourceID 下载接口返回的下载源标识。
-   * @returns 浏览器是否成功打开对应 HTTPS 地址。
+   * 使用系统浏览器打开当前版本中已由服务端或“我的源”登记的下载源。
+   * @param sourceID 下载源标识。
+   * @returns 浏览器是否成功打开对应 HTTPS 地址（成功时附带 openedExternal 标记）。
    */
   private async openDownloadSource(
     sourceID: number
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{ success: boolean; openedExternal?: boolean; error?: string }> {
     const info = this.availableUpdateInfo ?? this.downloadedUpdateInfo
     const source = info?.sources?.find((item) => item.id === sourceID)
     if (!source) return { success: false, error: '下载地址不存在' }
@@ -304,7 +563,7 @@ export class UpdaterAPI {
       const target = new URL(source.downloadUrl)
       if (target.protocol !== 'https:') return { success: false, error: '下载地址不安全' }
       await shell.openExternal(target.toString())
-      return { success: true }
+      return { success: true, openedExternal: true }
     } catch {
       return { success: false, error: '无法打开下载地址' }
     }

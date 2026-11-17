@@ -2,6 +2,7 @@
 /// <reference types="@ztools-center/ztools-api-types" />
 
 import type { SearchWallpaperConfig } from '@shared/searchWallpaper'
+import type { ForkUpdateAnalysis, UpdatePreferences } from '@shared/updateSource'
 import type {
   AiProviderInput,
   AiProviderMutationResult,
@@ -444,11 +445,13 @@ declare global {
         // 软件更新
         updaterCheckUpdate: () => Promise<{
           hasUpdate: boolean
+          currentVersion?: string
           latestVersion?: string
           updateInfo?: any
           migrationRequired?: boolean
           migrationReasons?: string[]
           releaseUrl?: string
+          forkAnalysis?: ForkUpdateAnalysis
           error?: string
         }>
         updaterStartUpdate: () => Promise<{
@@ -459,6 +462,9 @@ declare global {
           success: boolean
           error?: string
         }>
+        updaterGetPreferences: () => Promise<UpdatePreferences>
+        updaterSetPreferences: (prefs: Partial<UpdatePreferences>) => Promise<UpdatePreferences>
+        updaterAnalyzeFork: (forceRefresh?: boolean) => Promise<ForkUpdateAnalysis>
 
         // 指令管理
         // 返回设置页使用的原始指令快照，用于构建 alias 目标列表（commands 文本指令 + regexCommands 中可直接触发的 window 指令）

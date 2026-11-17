@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import defaultAvatar from '../assets/image/default.png'
 import { normalizeSearchWallpaperConfig, type SearchWallpaperConfig } from '@shared/searchWallpaper'
+import type { UpdateOrigin } from '@shared/updateSource'
 import {
   resolveVisibleAiRequestStatus,
   type AiRequestStatus,
@@ -51,6 +52,7 @@ export type BuiltInShortcutKey = 'search' | 'closePlugin' | 'killPlugin' | 'esc'
 // 更新状态
 interface AvailableUpdateInfo {
   hasUpdate: boolean
+  origin?: UpdateOrigin
   version?: string
   changelog?: string
 }
@@ -125,9 +127,13 @@ export const useWindowStore = defineStore('window', () => {
   // 更新状态
   const availableUpdateInfo = ref<AvailableUpdateInfo>({ hasUpdate: false })
   const autoCheckUpdateEnabled = ref(true)
+  const ignoreOfficialUpdateNotice = ref(false)
   const dismissedUpdateVersion = ref<string | null>(null)
   const shouldShowUpdateNotification = computed(() => {
     const availableVersion = availableUpdateInfo.value.version ?? ''
+    if (availableUpdateInfo.value.origin === 'official' && ignoreOfficialUpdateNotice.value) {
+      return false
+    }
     return (
       availableUpdateInfo.value.hasUpdate &&
       autoCheckUpdateEnabled.value &&
@@ -590,6 +596,15 @@ export const useWindowStore = defineStore('window', () => {
   }
 
   /**
+   * 同步“关闭官方新版本提示”开关状态；关闭后立即隐藏官方来源的主窗口提示。
+   * @param ignored 是否忽略官方新版本通知。
+   * @returns 无返回值。
+   */
+  function updateIgnoreOfficialUpdateNotice(ignored: boolean): void {
+    ignoreOfficialUpdateNotice.value = ignored
+  }
+
+  /**
    * 关闭当前版本的主窗口更新提示，关闭状态仅保留到本次应用退出。
    * @returns 无返回值
    */
@@ -610,6 +625,7 @@ export const useWindowStore = defineStore('window', () => {
       if (status.hasUpdate) {
         availableUpdateInfo.value = {
           hasUpdate: true,
+          origin: status.origin,
           version: status.version,
           changelog: status.changelog
         }
@@ -660,6 +676,7 @@ export const useWindowStore = defineStore('window', () => {
         if (data.autoCheckUpdate !== undefined) {
           autoCheckUpdateEnabled.value = data.autoCheckUpdate
         }
+        ignoreOfficialUpdateNotice.value = data.ignoreOfficialUpdateNotice === true
         if (data.theme) {
           theme.value = data.theme
         }
@@ -755,6 +772,7 @@ export const useWindowStore = defineStore('window', () => {
     searchWallpaper,
     availableUpdateInfo,
     autoCheckUpdateEnabled,
+    ignoreOfficialUpdateNotice,
     shouldShowUpdateNotification,
     updateWindowInfo,
     updatePlaceholder,
@@ -801,6 +819,7 @@ export const useWindowStore = defineStore('window', () => {
     shouldClearSearch,
     setAvailableUpdateInfo,
     updateAutoCheckUpdateEnabled,
+    updateIgnoreOfficialUpdateNotice,
     dismissUpdateNotification,
     checkUpdateStatus,
     loadSettings

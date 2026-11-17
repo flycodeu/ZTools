@@ -1,7 +1,9 @@
 import type { ProgressInfo } from 'electron-updater'
+import type { ForkUpdateAnalysis, UpdateOrigin } from '../../../shared/updateSource'
 
 export interface PlatformUpdateInfo {
   version: string
+  currentVersion?: string
   changelog: string
   releaseNotes?: string
   downloadUrl?: string
@@ -9,7 +11,10 @@ export interface PlatformUpdateInfo {
   migrationRequired?: boolean
   releaseUrl?: string
   feedUrl?: string
+  origin?: UpdateOrigin
   sources?: UpdateDownloadSource[]
+  preferredOrigin?: UpdateOrigin
+  forkAnalysis?: ForkUpdateAnalysis
 }
 
 export interface UpdateDownloadSource {
@@ -18,6 +23,10 @@ export interface UpdateDownloadSource {
   downloadUrl: string
   isDirect: boolean
   feedUrl?: string
+  origin?: UpdateOrigin
+  version?: string
+  changelog?: string
+  releaseUrl?: string
 }
 
 export interface PlatformUpdateResult {
@@ -30,12 +39,14 @@ export interface PlatformUpdateResult {
   migrationRequired?: boolean
   migrationReasons?: string[]
   releaseUrl?: string
+  forkAnalysis?: ForkUpdateAnalysis
   error?: string
 }
 
 export interface PlatformUpdateActionResult {
   success: boolean
   cancelled?: boolean
+  openedExternal?: boolean
   migrationRequired?: boolean
   error?: string
 }
@@ -61,6 +72,7 @@ export interface PlatformUpdaterService {
   checkForUpdates(downloadWhenAvailable: boolean): Promise<PlatformUpdateResult>
   startUpdate(updateInfo?: PlatformUpdateInfo): Promise<PlatformUpdateActionResult>
   cancelUpdate(): Promise<PlatformUpdateActionResult> | PlatformUpdateActionResult
+  resetDownloadState?(): void
   installDownloadedUpdate(): Promise<PlatformUpdateActionResult> | PlatformUpdateActionResult
   getDownloadStatus(): PlatformDownloadStatus
   cleanup(): void

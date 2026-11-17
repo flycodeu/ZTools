@@ -508,13 +508,61 @@ const api = {
      * @returns 主进程确认下载已停止后的结果。
      */
     cancelUpdate: () => ipcRenderer.invoke('updater:cancel-update'),
+    /**
+     * 清理当前已下载或失败的更新器缓存，使切换源后可以重新触发下载。
+     * @returns 重置结果与最新下载状态。
+     */
+    resetDownloadState: () => ipcRenderer.invoke('updater:reset-download-state'),
     openDownloadSource: (sourceID: number) =>
       ipcRenderer.invoke('updater:open-download-source', sourceID),
     installDownloadedUpdate: () => ipcRenderer.invoke('updater:install-downloaded-update'),
-    getDownloadStatus: () => ipcRenderer.invoke('updater:get-download-status')
+    getDownloadStatus: () => ipcRenderer.invoke('updater:get-download-status'),
+    /**
+     * 读取当前设备的更新源偏好与官方提示开关设置。
+     * @returns 当前生效的更新偏好配置。
+     */
+    getUpdatePreferences: () => ipcRenderer.invoke('updater:get-preferences'),
+    /**
+     * 更新并持久化设备级更新偏好配置。
+     * @param prefs 要修改的更新偏好字段。
+     * @returns 保存后的完整更新偏好设置。
+     */
+    setUpdatePreferences: (prefs: {
+      preferredUpdateSource?: 'mine' | 'official'
+      ignoreOfficialUpdateNotice?: boolean
+    }) => ipcRenderer.invoke('updater:set-preferences', prefs),
+    /**
+     * 分析当前仓库与“我的源”“官方源”之间的版本差距及合并影响。
+     * @param forceRefresh 为 true 时忽略短时缓存并强制刷新远端数据。
+     * @returns 双源对比及合并影响分析结果。
+     */
+    analyzeForkUpdate: (forceRefresh?: boolean) =>
+      ipcRenderer.invoke('updater:analyze-fork-update', forceRefresh)
   },
-  onUpdateAvailable: (callback: (data: { version: string; changelog: string }) => void) => {
+  onUpdateAvailable: (
+    callback: (data: { version: string; changelog: string; origin?: 'mine' | 'official' }) => void
+  ) => {
     ipcRenderer.on('update-available', (_event, data) => callback(data))
+  },
+  /**
+   * 监听更新源偏好或官方提示开关变化。
+   * @param callback 接收最新偏好配置的回调函数。
+   * @returns 用于移除当前监听器的清理函数。
+   */
+  onUpdatePreferencesChanged: (
+    callback: (prefs: {
+      preferredUpdateSource: 'mine' | 'official'
+      ignoreOfficialUpdateNotice: boolean
+    }) => void
+  ) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      prefs: { preferredUpdateSource: 'mine' | 'official'; ignoreOfficialUpdateNotice: boolean }
+    ): void => callback(prefs)
+    ipcRenderer.on('update-preferences-changed', handler)
+    return (): void => {
+      ipcRenderer.removeListener('update-preferences-changed', handler)
+    }
   },
   /**
    * 监听自动检查更新开关变化。

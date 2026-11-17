@@ -56,6 +56,7 @@ export class ElectronUpdaterService {
   private downloadPromise: Promise<PlatformUpdateActionResult> | null = null
   private downloadCancellationToken: CancellationToken | null = null
   private showWindowAfterDownload = true
+  private activeFeedUrl: string | null = null
 
   /**
    * 初始化标准更新器并绑定跨平台更新事件。
@@ -238,6 +239,18 @@ export class ElectronUpdaterService {
   }
 
   /**
+   * 在用户切换下载渠道或重试前重置已下载/失败状态，允许从新渠道重新下载。
+   * @returns 无返回值。
+   */
+  public resetDownloadState(): void {
+    // 正在下载或安装过程中不直接清状态，需先完成取消或等待安装退出。
+    if (this.state === 'downloading' || this.state === 'installing') return
+    this.activeFeedUrl = null
+    this.updateInfo = null
+    this.state = 'idle'
+  }
+
+  /**
    * 根据可选服务端 feed 下载当前更新，并在完成后启动平台安装流程。
    * @param updateInfo 检查更新发现的目标版本及服务端 feed 地址。
    * @returns 下载和安装启动结果。
@@ -245,11 +258,23 @@ export class ElectronUpdaterService {
   public async downloadAndInstall(
     updateInfo?: PlatformUpdateInfo
   ): Promise<PlatformUpdateActionResult> {
-    if (updateInfo?.feedUrl) {
+    const nextFeedUrl = updateInfo?.feedUrl ?? null
+
+    // 更换下载渠道或从错误态重试时必须清除先前渠道的已下载缓存状态。
+    if (this.state === 'error' || (nextFeedUrl && nextFeedUrl !== this.activeFeedUrl)) {
+      this.state = 'available'
+    }
+
+    if (nextFeedUrl) {
+      // 目标渠道可能是预发布或自定义分支版本，按目标版本同步预发布检查开关。
+      autoUpdater.allowPrerelease =
+        Boolean(updateInfo?.version?.includes('-')) ||
+        autoUpdater.currentVersion.prerelease.length > 0
       // 服务端 feed 提供选中下载源的元数据和对应安装包地址。
-      autoUpdater.setFeedURL({ provider: 'generic', url: updateInfo.feedUrl })
+      autoUpdater.setFeedURL({ provider: 'generic', url: nextFeedUrl })
+      this.activeFeedUrl = nextFeedUrl
       const checkResult = await this.checkForUpdates(false)
-      if (!checkResult.hasUpdate || checkResult.latestVersion !== updateInfo.version) {
+      if (!checkResult.hasUpdate || checkResult.latestVersion !== updateInfo?.version) {
         return { success: false, error: '更新元数据与当前版本不一致' }
       }
     }

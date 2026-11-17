@@ -1149,6 +1149,30 @@ export class InternalPluginAPI {
       return { success: true }
     })
 
+    this.handleInternal('internal:updater-get-preferences', async (event) => {
+      this.requireApi(event, 'internal:updater-get-preferences')
+      return updaterAPI.getUpdatePreferences()
+    })
+
+    this.handleInternal(
+      'internal:updater-set-preferences',
+      async (
+        event,
+        prefs: {
+          preferredUpdateSource?: 'mine' | 'official'
+          ignoreOfficialUpdateNotice?: boolean
+        }
+      ) => {
+        this.requireApi(event, 'internal:updater-set-preferences')
+        return updaterAPI.setUpdatePreferences(prefs)
+      }
+    )
+
+    this.handleInternal('internal:updater-analyze-fork', async (event, forceRefresh?: boolean) => {
+      this.requireApi(event, 'internal:updater-analyze-fork')
+      return await updaterAPI.analyzeForkUpdate(forceRefresh)
+    })
+
     // ==================== 其他 API ====================
     this.handleInternal('internal:reveal-in-finder', async (event, path: string) => {
       this.requireApi(event, 'internal:reveal-in-finder')

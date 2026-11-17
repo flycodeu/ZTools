@@ -8,6 +8,7 @@ import type { AiRequestStatusChange } from '@shared/aiRequestStatus'
 import type { PanelSearchSnapshot } from '@shared/commandService'
 import type { PluginMainWindowLaunchState } from '@shared/pluginLaunch'
 import type { AfdianPaymentMethod, AfdianPaymentWindowState } from '@shared/afdianPaymentWindow'
+import type { ForkUpdateAnalysis, UpdateOrigin, UpdatePreferences } from '@shared/updateSource'
 
 /**
  * 上次匹配状态接口
@@ -333,24 +334,50 @@ declare global {
           migrationRequired?: boolean
           migrationReasons?: string[]
           releaseUrl?: string
+          forkAnalysis?: ForkUpdateAnalysis
           error?: string
         }>
         showUpdateWindow: () => Promise<{ success: boolean; error?: string }>
-        startUpdate: (
-          sourceID?: number
-        ) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>
+        startUpdate: (sourceID?: number) => Promise<{
+          success: boolean
+          cancelled?: boolean
+          openedExternal?: boolean
+          error?: string
+        }>
         cancelUpdate: () => Promise<{ success: boolean; cancelled?: boolean; error?: string }>
-        openDownloadSource: (sourceID: number) => Promise<{ success: boolean; error?: string }>
+        resetDownloadState: () => Promise<{
+          success: boolean
+          status: {
+            hasUpdate: boolean
+            hasDownloaded: boolean
+            origin?: UpdateOrigin
+            currentVersion?: string
+            version?: string
+            changelog?: string
+            status?: string
+          }
+        }>
+        openDownloadSource: (
+          sourceID: number
+        ) => Promise<{ success: boolean; openedExternal?: boolean; error?: string }>
         installDownloadedUpdate: () => Promise<{ success: boolean; error?: string }>
         getDownloadStatus: () => Promise<{
           hasUpdate: boolean
           hasDownloaded: boolean
+          origin?: UpdateOrigin
+          currentVersion?: string
           version?: string
           changelog?: string
           status?: string
         }>
+        getUpdatePreferences: () => Promise<UpdatePreferences>
+        setUpdatePreferences: (prefs: Partial<UpdatePreferences>) => Promise<UpdatePreferences>
+        analyzeForkUpdate: (forceRefresh?: boolean) => Promise<ForkUpdateAnalysis>
       }
-      onUpdateAvailable: (callback: (data: { version: string; changelog: string }) => void) => void
+      onUpdateAvailable: (
+        callback: (data: { version: string; changelog: string; origin?: UpdateOrigin }) => void
+      ) => void
+      onUpdatePreferencesChanged: (callback: (prefs: UpdatePreferences) => void) => () => void
       onAutoCheckUpdateChanged: (callback: (enabled: boolean) => void) => () => void
       onUpdateDownloaded: (callback: (data: { version: string; changelog: string }) => void) => void
       onUpdateDownloadStart: (callback: (data: { version: string }) => void) => void

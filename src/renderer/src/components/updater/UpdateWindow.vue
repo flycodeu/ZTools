@@ -4,8 +4,13 @@
     <div class="header window-drag-region">
       <img :src="logo" class="header-icon" draggable="false" />
       <div class="header-info">
-        <div class="title">发现新版本 {{ version }}</div>
-        <div class="subtitle">ZTools</div>
+        <div class="title">
+          {{ isSelectedSourceUpToDate ? '我的源已是最新' : '发现新版本' }} {{ displayedVersion }}
+        </div>
+        <div class="subtitle">
+          ZTools · {{ selectedSourceOriginLabel
+          }}<span v-if="updateInfo?.currentVersion">（当前 v{{ updateInfo.currentVersion }}）</span>
+        </div>
       </div>
       <button
         type="button"
@@ -20,15 +25,42 @@
 
     <!-- 更新内容 -->
     <div class="content">
+      <div
+        v-if="showImpactBanner && forkAnalysis"
+        class="impact-banner"
+        :class="forkAnalysis.mergeImpact.level"
+      >
+        <div class="impact-banner-head">
+          <span class="impact-badge" :class="forkAnalysis.mergeImpact.level">
+            {{ mergeImpactLevelLabel }}
+          </span>
+          <span class="impact-title">官方版本差距与合并评估</span>
+          <button
+            v-if="showIgnoreOfficialAction"
+            type="button"
+            class="ignore-official-btn"
+            @click="toggleIgnoreOfficialNotice"
+          >
+            {{ ignoreOfficialUpdateNotice ? '已关闭官方提示（点击恢复）' : '关闭官方新版本提示' }}
+          </button>
+        </div>
+        <p class="impact-summary">{{ forkAnalysis.mergeImpact.summary }}</p>
+        <div v-if="forkAnalysis.mergeImpact.overlapFiles.length > 0" class="impact-overlap">
+          重叠文件：{{ forkAnalysis.mergeImpact.overlapFiles.slice(0, 3).join('、')
+          }}<span v-if="forkAnalysis.mergeImpact.overlapFiles.length > 3">
+            等 {{ forkAnalysis.mergeImpact.overlapFiles.length }} 个文件</span
+          >
+        </div>
+      </div>
       <!-- eslint-disable-next-line vue/no-v-html -->
       <div class="changelog" v-html="parsedChangelog"></div>
     </div>
 
     <!-- 底部按钮 -->
     <div class="footer">
-      <div v-if="status !== 'available'" class="update-status" :class="status">
+      <div v-if="status !== 'available' || noticeMessage" class="update-status" :class="status">
         <div class="status-row">
-          <span>{{ statusText }}</span>
+          <span>{{ noticeMessage || statusText }}</span>
           <span v-if="status === 'downloading'">{{ progressText }}</span>
         </div>
         <div v-if="status === 'downloading'" class="progress-track">
@@ -49,10 +81,11 @@
                 v-model.number="selectedSourceID"
                 :class="{ 'has-help': selectedSource?.platformName.includes('夸克') }"
                 :disabled="sourceSelectionDisabled"
+                @change="handleSourceChange"
                 @keydown.stop
               >
                 <option v-for="source in availableSources" :key="source.id" :value="source.id">
-                  {{ source.platformName }}
+                  {{ formatSourceOptionLabel(source) }}
                 </option>
               </select>
               <button
@@ -80,7 +113,11 @@
           >
             {{ secondaryButtonText }}
           </button>
-          <button class="btn confirm" :disabled="isBusy || !selectedSource" @click="startUpdate">
+          <button
+            class="btn confirm"
+            :disabled="isBusy || !selectedSource || isSwitchingSource || isSelectedSourceUpToDate"
+            @click="startUpdate"
+          >
             {{ primaryButtonText }}
           </button>
         </div>
@@ -93,16 +130,28 @@
 import { marked } from 'marked'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import logo from '../../assets/logo.png'
-import { getDefaultUpdateSourceID, isInAppUpdateSource } from '@shared/updateSource'
+import {
+  compareSemverVersions,
+  getDefaultUpdateSourceID,
+  isInAppUpdateSource,
+  type ForkUpdateAnalysis,
+  type UpdateOrigin,
+  type UpdatePreferences
+} from '@shared/updateSource'
 
 interface UpdateInfo {
   version: string
+  currentVersion?: string
   changelog: string
   releaseNotes?: string
   downloadUrl?: string
   manualDownloadRequired?: boolean
   releaseUrl?: string
+  origin?: UpdateOrigin
+  preferredOrigin?: UpdateOrigin
   sources?: UpdateDownloadSource[]
+  forkAnalysis?: ForkUpdateAnalysis
+  preferences?: UpdatePreferences
 }
 
 interface UpdateDownloadSource {
@@ -111,6 +160,10 @@ interface UpdateDownloadSource {
   downloadUrl: string
   isDirect: boolean
   feedUrl?: string
+  origin?: UpdateOrigin
+  version?: string
+  changelog?: string
+  releaseUrl?: string
 }
 
 interface DownloadProgress {
@@ -127,15 +180,61 @@ const downloadProgress = ref(0)
 const transferredBytes = ref(0)
 const totalBytes = ref(0)
 const updateError = ref('')
+const noticeMessage = ref('')
 const isCancelling = ref(false)
+const isSwitchingSource = ref(false)
+const ignoreOfficialUpdateNotice = ref(false)
 const selectedSourceID = ref<number | null>(null)
 const acrylicLightOpacity = ref(78)
 const acrylicDarkOpacity = ref(50)
 const stopUpdateListeners: Array<() => void> = []
 
+const availableSources = computed(() => updateInfo.value?.sources ?? [])
+const selectedSource = computed(
+  () =>
+    availableSources.value.find((source) => source.id === selectedSourceID.value) ??
+    availableSources.value[0]
+)
+const displayedVersion = computed(
+  () => selectedSource.value?.version || version.value || updateInfo.value?.version || ''
+)
+const displayedChangelog = computed(
+  () => selectedSource.value?.changelog || changelog.value || updateInfo.value?.changelog || ''
+)
+const selectedSourceOriginLabel = computed(() =>
+  selectedSource.value?.origin === 'mine' ? '我的源' : '官方源'
+)
+const forkAnalysis = computed(() => updateInfo.value?.forkAnalysis ?? null)
+const isSelectedSourceUpToDate = computed(() => {
+  if (selectedSource.value?.origin !== 'mine') return false
+  const currentVersion =
+    updateInfo.value?.currentVersion || forkAnalysis.value?.currentVersion || ''
+  const sourceVersion = selectedSource.value?.version || ''
+  if (!currentVersion || !sourceVersion) return false
+  return compareSemverVersions(sourceVersion, currentVersion) <= 0
+})
+const showImpactBanner = computed(() => {
+  if (!forkAnalysis.value) return false
+  return (
+    selectedSource.value?.origin === 'official' ||
+    forkAnalysis.value.officialSource.hasNewerThanBase
+  )
+})
+const showIgnoreOfficialAction = computed(
+  () => selectedSource.value?.origin === 'official' || updateInfo.value?.origin === 'official'
+)
+const mergeImpactLevelLabel = computed(() => {
+  const level = forkAnalysis.value?.mergeImpact.level
+  if (level === 'up-to-date') return '已包含'
+  if (level === 'low') return '可直接合并'
+  if (level === 'medium') return '建议评估'
+  if (level === 'high') return '影响较大'
+  return '待检查'
+})
+
 // 解析 Markdown
 const parsedChangelog = computed(() => {
-  return marked.parse(changelog.value)
+  return marked.parse(displayedChangelog.value)
 })
 
 const isBusy = computed(() => status.value === 'downloading' || status.value === 'installing')
@@ -150,20 +249,16 @@ const statusText = computed(() => {
   if (status.value === 'installing') return '正在安装更新...'
   return updateError.value || '更新下载失败，请重试'
 })
-const availableSources = computed(() => updateInfo.value?.sources ?? [])
-const selectedSource = computed(
-  () =>
-    availableSources.value.find((source) => source.id === selectedSourceID.value) ??
-    availableSources.value[0]
-)
 const showSourceSelector = computed(() => availableSources.value.length > 1)
+// 仅在真正进入安装重启阶段或正在切换取消时短暂锁定下拉框，其余状态允许随时切源。
 const sourceSelectionDisabled = computed(
-  () => status.value !== 'available' && status.value !== 'error'
+  () => status.value === 'installing' || isCancelling.value || isSwitchingSource.value
 )
 const primaryButtonText = computed(() => {
   if (status.value === 'downloading') return `下载中 ${progressText.value}`
   if (status.value === 'downloaded') return '立即安装'
   if (status.value === 'installing') return '正在安装...'
+  if (isSelectedSourceUpToDate.value) return '我的源已最新'
   if (selectedSource.value && !isInAppUpdateSource(selectedSource.value)) {
     return '去下载'
   }
@@ -174,19 +269,77 @@ const secondaryButtonText = computed(() => {
   if (isCancelling.value) return '正在取消...'
   return status.value === 'downloading' ? '取消下载' : '稍后更新'
 })
+
+/**
+ * 格式化下载渠道下拉选项标签，携带该源目标版本号以便切换时直观对比。
+ * @param source 下载渠道描述对象。
+ * @returns 展示在下拉框中的渠道文案。
+ */
+function formatSourceOptionLabel(source: UpdateDownloadSource): string {
+  return source.version ? `${source.platformName} (v${source.version})` : source.platformName
+}
+
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB'
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
 /**
- * 使用当前选中的下载渠道执行更新，人工渠道成功打开后关闭更新窗口。
+ * 在切换下载源时终止进行中的下载并重置底层更新器状态，确保新源可立即生效。
+ * @returns 切源清理完成后结束的 Promise。
+ */
+const handleSourceChange = async (): Promise<void> => {
+  if (isSwitchingSource.value) return
+  isSwitchingSource.value = true
+  try {
+    // 若先前正在下载其他源，先取消当前下载任务避免并发覆盖进度事件。
+    if (status.value === 'downloading') {
+      await window.ztools.updater.cancelUpdate()
+    }
+    await window.ztools.updater.resetDownloadState()
+    downloadProgress.value = 0
+    transferredBytes.value = 0
+    totalBytes.value = 0
+    updateError.value = ''
+    noticeMessage.value = ''
+    status.value = 'available'
+  } catch (error) {
+    updateError.value = error instanceof Error ? error.message : '切换下载渠道失败，请重试'
+    status.value = 'error'
+  } finally {
+    isSwitchingSource.value = false
+  }
+}
+
+/**
+ * 在更新窗口内一键切换“关闭官方新版本提示”开关。
+ * @returns 偏好保存完成后结束的 Promise。
+ */
+const toggleIgnoreOfficialNotice = async (): Promise<void> => {
+  try {
+    const nextIgnored = !ignoreOfficialUpdateNotice.value
+    const saved = await window.ztools.updater.setUpdatePreferences({
+      ignoreOfficialUpdateNotice: nextIgnored
+    })
+    ignoreOfficialUpdateNotice.value = saved.ignoreOfficialUpdateNotice
+    noticeMessage.value = saved.ignoreOfficialUpdateNotice
+      ? '已关闭官方新版本自动提示，后续仅关注我的源（可在“关于”中恢复）'
+      : '已恢复官方新版本提示'
+  } catch (error) {
+    updateError.value = error instanceof Error ? error.message : '保存设置失败'
+  }
+}
+
+/**
+ * 使用当前选中的下载渠道执行更新，外部跳转不会阻塞窗口状态或锁定渠道切换。
  * @returns 操作处理完成后结束的 Promise。
  */
 const startUpdate = async (): Promise<void> => {
-  if (isBusy.value || !updateInfo.value || !selectedSource.value) return
+  if (isBusy.value || isSwitchingSource.value || !updateInfo.value || !selectedSource.value) return
+  if (isSelectedSourceUpToDate.value) return
 
   updateError.value = ''
+  noticeMessage.value = ''
   try {
     // 人工渠道只打开浏览器，不进入应用内下载状态。
     if (!isInAppUpdateSource(selectedSource.value)) {
@@ -195,7 +348,8 @@ const startUpdate = async (): Promise<void> => {
         updateError.value = result.error || '打开下载页面失败'
         status.value = 'error'
       } else {
-        closeWindow()
+        noticeMessage.value = '已在浏览器打开下载页面，你也可以随时切换其他更新渠道'
+        status.value = 'available'
       }
       return
     }
@@ -219,6 +373,10 @@ const startUpdate = async (): Promise<void> => {
     if (!result.success) {
       updateError.value = result.error || '下载更新失败'
       status.value = 'error'
+    } else if (result.openedExternal) {
+      // Windows 绿色便携版等环境通过外部浏览器打开下载，不进入不可退出的安装锁定态。
+      noticeMessage.value = '已为你打开外部下载页面，仍可自由切换更新渠道或稍后更新'
+      status.value = 'available'
     } else {
       status.value = 'installing'
     }
@@ -357,13 +515,22 @@ onMounted(() => {
         updateInfo.value = info
         version.value = info.version
         changelog.value = info.changelog
+        ignoreOfficialUpdateNotice.value = info.preferences?.ignoreOfficialUpdateNotice === true
         if (!info.sources?.some((source) => source.id === selectedSourceID.value)) {
-          selectedSourceID.value = getDefaultUpdateSourceID(info.sources ?? [])
+          selectedSourceID.value = getDefaultUpdateSourceID(
+            info.sources ?? [],
+            info.preferredOrigin ?? 'mine'
+          )
         }
         if (info.downloadStatus?.status === 'downloaded') status.value = 'downloaded'
         else if (info.downloadStatus?.status === 'downloading') status.value = 'downloading'
       }
     ),
+    window.ztools.onUpdatePreferencesChanged
+      ? window.ztools.onUpdatePreferencesChanged((prefs) => {
+          ignoreOfficialUpdateNotice.value = prefs.ignoreOfficialUpdateNotice
+        })
+      : () => undefined,
     window.electron.ipcRenderer.on('update-download-start', () => {
       status.value = 'downloading'
       updateError.value = ''
@@ -588,6 +755,138 @@ body,
   line-height: 1.6;
 }
 
+.impact-banner {
+  margin: 14px 24px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  background: rgba(59, 130, 246, 0.06);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.impact-banner.low,
+.impact-banner.up-to-date {
+  border-color: rgba(16, 185, 129, 0.28);
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.impact-banner.medium {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.impact-banner.high {
+  border-color: rgba(239, 68, 68, 0.32);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.impact-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.impact-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #1d4ed8;
+  background: rgba(59, 130, 246, 0.14);
+}
+
+.impact-badge.low,
+.impact-badge.up-to-date {
+  color: #047857;
+  background: rgba(16, 185, 129, 0.18);
+}
+
+.impact-badge.medium {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.18);
+}
+
+.impact-badge.high {
+  color: #b91c1c;
+  background: rgba(239, 68, 68, 0.18);
+}
+
+.impact-title {
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.ignore-official-btn {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  background: rgba(255, 255, 255, 0.72);
+  color: #4b5563;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ignore-official-btn:hover {
+  background: rgba(255, 255, 255, 0.96);
+  color: #111827;
+}
+
+.impact-summary {
+  margin: 6px 0 0;
+  color: #374151;
+}
+
+.impact-overlap {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #6b7280;
+  word-break: break-all;
+}
+
+@media (prefers-color-scheme: dark) {
+  .impact-title {
+    color: #f3f4f6;
+  }
+
+  .impact-badge.low,
+  .impact-badge.up-to-date {
+    color: #6ee7b7;
+  }
+
+  .impact-badge.medium {
+    color: #fcd34d;
+  }
+
+  .impact-badge.high {
+    color: #fca5a5;
+  }
+
+  .ignore-official-btn {
+    border-color: rgba(255, 255, 255, 0.16);
+    background: rgba(30, 30, 30, 0.72);
+    color: #d1d5db;
+  }
+
+  .ignore-official-btn:hover {
+    background: rgba(55, 65, 81, 0.85);
+    color: #fff;
+  }
+
+  .impact-summary {
+    color: #d1d5db;
+  }
+
+  .impact-overlap {
+    color: #9ca3af;
+  }
+}
+
 .changelog :deep(a) {
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
@@ -688,7 +987,7 @@ body,
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
+  gap: 12px;
 }
 
 .source-area {
@@ -700,11 +999,14 @@ body,
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .source-select-control {
   position: relative;
-  flex: none;
+  min-width: 0;
+  flex: 1;
+  max-width: 176px;
 }
 
 .source-label {
@@ -715,14 +1017,19 @@ body,
 
 .source-selector select {
   box-sizing: border-box;
-  min-width: 112px;
+  width: 100%;
+  min-width: 100px;
+  max-width: 100%;
   height: 32px;
-  padding: 0 28px 0 10px;
+  padding: 0 26px 0 10px;
   border: 1px solid rgba(0, 0, 0, 0.14);
   border-radius: 6px;
   background: rgba(255, 255, 255, 0.7);
   color: #333;
   font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   outline: none;
   cursor: pointer;
 }

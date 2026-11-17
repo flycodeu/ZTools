@@ -85,6 +85,7 @@ const searchResultsRef = ref<{
   resetCollapseState: () => void
 } | null>(null)
 let removeAutoCheckUpdateChangedListener: (() => void) | null = null
+let removeUpdatePreferencesChangedListener: (() => void) | null = null
 let removeSearchWallpaperListener: (() => void) | null = null
 let removeCompactMainWindowHeaderListener: (() => void) | null = null
 let removeHideMainWindowOnPluginEscListener: (() => void) | null = null
@@ -945,6 +946,7 @@ onMounted(async () => {
     console.log('发现可用更新:', data)
     windowStore.setAvailableUpdateInfo({
       hasUpdate: true,
+      origin: data.origin,
       version: data.version,
       changelog: data.changelog
     })
@@ -953,6 +955,11 @@ onMounted(async () => {
   // 设置插件切换自动检查后，立即同步主窗口提示的可见性。
   removeAutoCheckUpdateChangedListener = window.ztools.onAutoCheckUpdateChanged((enabled) => {
     windowStore.updateAutoCheckUpdateEnabled(enabled)
+  })
+
+  // 设置插件或更新窗口切换“关闭官方新版本提示”后，立即同步主窗口通知可见性。
+  removeUpdatePreferencesChangedListener = window.ztools.onUpdatePreferencesChanged((prefs) => {
+    windowStore.updateIgnoreOfficialUpdateNotice(prefs.ignoreOfficialUpdateNotice)
   })
 
   // 监听更新下载开始事件
@@ -977,6 +984,8 @@ onUnmounted(() => {
   // 释放支持主动清理的 IPC 监听器，避免重复挂载后收到多次通知。
   removeAutoCheckUpdateChangedListener?.()
   removeAutoCheckUpdateChangedListener = null
+  removeUpdatePreferencesChangedListener?.()
+  removeUpdatePreferencesChangedListener = null
   removeSearchWallpaperListener?.()
   removeSearchWallpaperListener = null
   removeCompactMainWindowHeaderListener?.()

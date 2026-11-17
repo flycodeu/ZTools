@@ -1,23 +1,42 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useToast } from '@/components'
-import { GITHUB_LATEST_RELEASE_URL, GITHUB_REPOSITORY_URL } from '@shared/updateSource'
+import {
+  GITHUB_LATEST_RELEASE_URL,
+  GITHUB_REPOSITORY_URL,
+  type ForkUpdateAnalysis,
+  type UpdateOrigin
+} from '@shared/updateSource'
 
 const { info, error, confirm } = useToast()
 
 const appVersion = ref('')
 const isCheckingUpdate = ref(false)
+const isAnalyzingFork = ref(false)
 const autoCheckUpdate = ref(true)
 const receiveBetaUpdates = ref(false)
+const preferredUpdateSource = ref<UpdateOrigin>('mine')
+const ignoreOfficialUpdateNotice = ref(false)
+const forkAnalysis = ref<ForkUpdateAnalysis | null>(null)
 const showUpdateOptions = ref(false)
 const currentYear = new Date().getFullYear()
+const showUpdateOptionsMenu = computed(() => appVersion.value !== '' && appVersion.value !== '未知')
 const showBetaUpdateOption = computed(
   () => appVersion.value !== '' && appVersion.value !== '未知' && !appVersion.value.includes('-')
 )
+const mergeImpactLabel = computed(() => {
+  const level = forkAnalysis.value?.mergeImpact.level
+  if (level === 'up-to-date') return '已包含官方改动'
+  if (level === 'low') return '无冲突 · 可直接合并'
+  if (level === 'medium') return '核心或依赖变更 · 需评估'
+  if (level === 'high') return '存在重叠改动 · 建议自决'
+  return '暂无法比对'
+})
 
 onMounted(async () => {
   await getAppVersion()
   await loadAutoCheckSetting()
+  void refreshForkAnalysis(false, true)
   window.addEventListener('click', closeUpdateOptions)
   window.addEventListener('keydown', handleUpdateOptionsKeydown, true)
 })
@@ -36,12 +55,36 @@ async function getAppVersion(): Promise<void> {
   }
 }
 
+/**
+ * 刷新“我的源”与“官方源”的版本差距及合并影响分析结果。
+ * @param forceRefresh 为 true 时忽略主进程短时缓存重新拉取远端数据。
+ * @param silent 静默刷新失败时不弹出错误提示（用于页面首次挂载）。
+ * @returns 分析刷新完成后结束的 Promise。
+ */
+async function refreshForkAnalysis(forceRefresh = true, silent = false): Promise<void> {
+  if (isAnalyzingFork.value) return
+  isAnalyzingFork.value = true
+  try {
+    forkAnalysis.value = await window.ztools.internal.updaterAnalyzeFork(forceRefresh)
+  } catch (err: any) {
+    console.error('获取版本对比分析失败:', err)
+    if (!silent) {
+      error('版本对比分析失败: ' + (err?.message || '网络不可用'))
+    }
+  } finally {
+    isAnalyzingFork.value = false
+  }
+}
+
 async function handleCheckUpdate(): Promise<void> {
   if (isCheckingUpdate.value) return
   isCheckingUpdate.value = true
 
   try {
     const result = await window.ztools.internal.updaterCheckUpdate()
+    if (result.forkAnalysis) {
+      forkAnalysis.value = result.forkAnalysis
+    }
     if (result.migrationRequired) {
       const shouldOpenRelease = await confirm({
         title: '需要更新 ZTools',
@@ -59,6 +102,11 @@ async function handleCheckUpdate(): Promise<void> {
     if (!result.hasUpdate) {
       if (result.error) {
         error('检查更新出错: ' + result.error)
+      } else if (
+        result.forkAnalysis?.officialSource.hasNewerThanBase &&
+        ignoreOfficialUpdateNotice.value
+      ) {
+        info('我的源已是最新版（已开启关闭官方新版本提示，可在下方查看官方版本差距）')
       } else {
         info('当前已是最新版本')
       }
@@ -69,6 +117,16 @@ async function handleCheckUpdate(): Promise<void> {
   } finally {
     isCheckingUpdate.value = false
   }
+}
+
+/**
+ * 在系统浏览器中打开外部链接。
+ * @param url 要打开的 HTTPS 地址。
+ * @returns 无返回值。
+ */
+function openExternalUrl(url: string): void {
+  if (!url) return
+  window.ztools.shellOpenExternal(url)
 }
 
 function openQQGroup(): void {
@@ -85,14 +143,69 @@ function openSponsor(): void {
 
 async function loadAutoCheckSetting(): Promise<void> {
   try {
-    const data = await window.ztools.internal.dbGet('settings-general')
+    const [data, prefs] = await Promise.all([
+      window.ztools.internal.dbGet('settings-general'),
+      window.ztools.internal.updaterGetPreferences().catch(() => null)
+    ])
     if (data) {
       autoCheckUpdate.value = data.autoCheckUpdate ?? true
       receiveBetaUpdates.value = data.receiveBetaUpdates === true
+      preferredUpdateSource.value = data.preferredUpdateSource === 'official' ? 'official' : 'mine'
+      ignoreOfficialUpdateNotice.value = data.ignoreOfficialUpdateNotice === true
+    }
+    if (prefs) {
+      preferredUpdateSource.value = prefs.preferredUpdateSource
+      ignoreOfficialUpdateNotice.value = prefs.ignoreOfficialUpdateNotice
     }
   } catch (err) {
     console.error('加载自动更新设置失败:', err)
   }
+}
+
+/**
+ * 保存默认更新源偏好（“我的源”或“官方源”）并同步通知主进程。
+ * @returns 偏好保存完成后结束的 Promise。
+ */
+async function handlePreferredUpdateSourceChange(): Promise<void> {
+  try {
+    const saved = await window.ztools.internal.updaterSetPreferences({
+      preferredUpdateSource: preferredUpdateSource.value
+    })
+    preferredUpdateSource.value = saved.preferredUpdateSource
+    info(
+      saved.preferredUpdateSource === 'mine'
+        ? '已切换默认更新源为“我的源”'
+        : '已切换默认更新源为“官方源”'
+    )
+  } catch (err) {
+    console.error('保存默认更新源失败:', err)
+    error('默认更新源设置保存失败')
+  }
+}
+
+/**
+ * 保存“关闭官方新版本提示”开关并同步更新主窗口通知可见性。
+ * @returns 偏好保存完成后结束的 Promise。
+ */
+async function handleIgnoreOfficialNoticeChange(): Promise<void> {
+  try {
+    const saved = await window.ztools.internal.updaterSetPreferences({
+      ignoreOfficialUpdateNotice: ignoreOfficialUpdateNotice.value
+    })
+    ignoreOfficialUpdateNotice.value = saved.ignoreOfficialUpdateNotice
+  } catch (err) {
+    console.error('保存关闭官方提示设置失败:', err)
+    error('官方提示开关保存失败')
+  }
+}
+
+/**
+ * 从对比卡片快捷切换“关闭官方新版本提示”状态。
+ * @returns 切换与保存完成后结束的 Promise。
+ */
+async function toggleIgnoreOfficialFromCard(): Promise<void> {
+  ignoreOfficialUpdateNotice.value = !ignoreOfficialUpdateNotice.value
+  await handleIgnoreOfficialNoticeChange()
 }
 
 async function handleAutoCheckUpdateChange(): Promise<void> {
@@ -172,7 +285,7 @@ async function handleReceiveBetaUpdatesChange(): Promise<void> {
         />
         <span class="toggle-slider"></span>
       </label>
-      <div v-if="showBetaUpdateOption" class="update-options-wrapper" @click.stop>
+      <div v-if="showUpdateOptionsMenu" class="update-options-wrapper" @click.stop>
         <button
           class="icon-btn update-options-button"
           type="button"
@@ -184,19 +297,50 @@ async function handleReceiveBetaUpdatesChange(): Promise<void> {
           <div class="i-z-more" />
         </button>
         <Transition name="update-options">
-          <div v-if="showUpdateOptions" class="update-options-menu">
-            <div class="update-options-copy">
-              <span>接收 Beta 版本更新</span>
-              <small>开启后，正式版也会接收测试版本</small>
+          <div v-if="showUpdateOptions" class="update-options-menu" role="menu">
+            <div class="update-options-item">
+              <div class="update-options-copy">
+                <span>默认更新源</span>
+                <small>默认优先检查并下载我的源，仍支持在更新窗切换</small>
+              </div>
+              <select
+                v-model="preferredUpdateSource"
+                class="source-preference-select"
+                aria-label="选择默认更新源"
+                @change="handlePreferredUpdateSourceChange"
+              >
+                <option value="mine">我的源</option>
+                <option value="official">官方源</option>
+              </select>
             </div>
-            <label class="toggle beta-update-toggle">
-              <input
-                v-model="receiveBetaUpdates"
-                type="checkbox"
-                @change="handleReceiveBetaUpdatesChange"
-              />
-              <span class="toggle-slider"></span>
-            </label>
+            <div class="update-options-item">
+              <div class="update-options-copy">
+                <span>关闭官方新版本提示</span>
+                <small>开启后不再自动弹出官方更新提示，仅提示我的源</small>
+              </div>
+              <label class="toggle beta-update-toggle">
+                <input
+                  v-model="ignoreOfficialUpdateNotice"
+                  type="checkbox"
+                  @change="handleIgnoreOfficialNoticeChange"
+                />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div v-if="showBetaUpdateOption" class="update-options-item">
+              <div class="update-options-copy">
+                <span>接收 Beta 版本更新</span>
+                <small>开启后，正式版也会接收测试版本</small>
+              </div>
+              <label class="toggle beta-update-toggle">
+                <input
+                  v-model="receiveBetaUpdates"
+                  type="checkbox"
+                  @change="handleReceiveBetaUpdatesChange"
+                />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
           </div>
         </Transition>
       </div>
@@ -419,6 +563,113 @@ async function handleReceiveBetaUpdatesChange(): Promise<void> {
         </svg>
         {{ isCheckingUpdate ? '检查中...' : '检查更新' }}
       </button>
+
+      <!-- 双源对比与官方版本差距评估卡片 -->
+      <div v-if="forkAnalysis" class="fork-analysis-card">
+        <div class="fork-analysis-header">
+          <div class="fork-analysis-title-group">
+            <span class="fork-analysis-title">更新源对比与合并评估</span>
+            <span class="fork-base-pill">
+              基线 v{{ forkAnalysis.upstreamBaseVersion }} ({{ forkAnalysis.upstreamBaseCommit }})
+            </span>
+          </div>
+          <button
+            type="button"
+            class="fork-refresh-btn"
+            :disabled="isAnalyzingFork"
+            @click="refreshForkAnalysis(true, false)"
+          >
+            {{ isAnalyzingFork ? '比对中...' : '重新比对' }}
+          </button>
+        </div>
+
+        <div class="fork-source-grid">
+          <div class="fork-source-box">
+            <div class="fork-source-top">
+              <span class="fork-source-name">我的源 ({{ forkAnalysis.mySource.repo }})</span>
+              <span
+                class="fork-status-tag"
+                :class="forkAnalysis.mySource.hasUpdate ? 'is-update' : 'is-latest'"
+              >
+                {{ forkAnalysis.mySource.hasUpdate ? '有新版本' : '已最新' }}
+              </span>
+            </div>
+            <div class="fork-source-version">
+              {{
+                forkAnalysis.mySource.latestVersion
+                  ? `v${forkAnalysis.mySource.latestVersion}`
+                  : '暂无远端版本'
+              }}
+            </div>
+            <button
+              type="button"
+              class="fork-link-btn"
+              @click="openExternalUrl(forkAnalysis.mySource.releaseUrl)"
+            >
+              打开发布页
+            </button>
+          </div>
+
+          <div class="fork-source-box">
+            <div class="fork-source-top">
+              <span class="fork-source-name">官方源 ({{ forkAnalysis.officialSource.repo }})</span>
+              <span
+                class="fork-status-tag"
+                :class="
+                  forkAnalysis.officialSource.hasNewerThanBase ? 'is-upstream-ahead' : 'is-latest'
+                "
+              >
+                {{ forkAnalysis.officialSource.hasNewerThanBase ? '有新改动' : '已包含' }}
+              </span>
+            </div>
+            <div class="fork-source-version">
+              {{
+                forkAnalysis.officialSource.latestVersion
+                  ? `v${forkAnalysis.officialSource.latestVersion}`
+                  : '暂未获取'
+              }}
+            </div>
+            <button
+              type="button"
+              class="fork-link-btn"
+              @click="openExternalUrl(forkAnalysis.officialSource.releaseUrl)"
+            >
+              打开发布页
+            </button>
+          </div>
+        </div>
+
+        <div class="fork-impact-panel" :class="`level-${forkAnalysis.mergeImpact.level}`">
+          <div class="fork-impact-head">
+            <span class="fork-impact-badge" :class="`level-${forkAnalysis.mergeImpact.level}`">
+              {{ mergeImpactLabel }}
+            </span>
+            <button
+              v-if="forkAnalysis.officialSource.hasNewerThanBase || ignoreOfficialUpdateNotice"
+              type="button"
+              class="fork-ignore-btn"
+              @click="toggleIgnoreOfficialFromCard"
+            >
+              {{ ignoreOfficialUpdateNotice ? '已关闭官方提示（点击开启）' : '关闭官方新版本提示' }}
+            </button>
+          </div>
+          <p class="fork-impact-summary">{{ forkAnalysis.mergeImpact.summary }}</p>
+          <ul v-if="forkAnalysis.mergeImpact.reasons.length > 0" class="fork-impact-reasons">
+            <li
+              v-for="(reason, index) in forkAnalysis.mergeImpact.reasons.slice(0, 4)"
+              :key="index"
+            >
+              {{ reason }}
+            </li>
+          </ul>
+          <div v-if="forkAnalysis.mergeImpact.overlapFiles.length > 0" class="fork-overlap-files">
+            可能冲突文件：{{ forkAnalysis.mergeImpact.overlapFiles.slice(0, 5).join('、')
+            }}<span v-if="forkAnalysis.mergeImpact.overlapFiles.length > 5">
+              等 {{ forkAnalysis.mergeImpact.overlapFiles.length }} 个文件</span
+            >
+          </div>
+        </div>
+      </div>
 
       <!-- 版权信息 -->
       <div class="about-copyright">
@@ -644,10 +895,10 @@ async function handleReceiveBetaUpdatesChange(): Promise<void> {
   position: absolute;
   top: calc(100% + 7px);
   right: 0;
-  width: 276px;
+  width: 312px;
   display: flex;
-  align-items: center;
-  gap: 18px;
+  flex-direction: column;
+  gap: 14px;
   box-sizing: border-box;
   border: 1px solid var(--divider-color);
   border-radius: 7px;
@@ -655,6 +906,244 @@ async function handleReceiveBetaUpdatesChange(): Promise<void> {
   box-shadow: 0 10px 28px var(--shadow-color);
   padding: 13px 14px;
   color: var(--text-color);
+}
+
+.update-options-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.source-preference-select {
+  flex: none;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--control-border);
+  background: var(--card-bg);
+  color: var(--text-color);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+
+.fork-analysis-card {
+  width: 100%;
+  max-width: 640px;
+  margin-bottom: 24px;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--divider-color);
+  background: var(--card-bg);
+  text-align: left;
+  box-sizing: border-box;
+}
+
+.fork-analysis-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.fork-analysis-title-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fork-analysis-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-color);
+}
+
+.fork-base-pill {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--hover-bg);
+}
+
+.fork-refresh-btn {
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--control-border);
+  background: transparent;
+  color: var(--text-color);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fork-refresh-btn:hover:not(:disabled) {
+  background: var(--hover-bg);
+}
+
+.fork-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.fork-source-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.fork-source-box {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--control-border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fork-source-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.fork-source-name {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fork-status-tag {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-weight: 500;
+}
+
+.fork-status-tag.is-latest {
+  background: rgba(16, 185, 129, 0.14);
+  color: #10b981;
+}
+
+.fork-status-tag.is-update,
+.fork-status-tag.is-upstream-ahead {
+  background: rgba(59, 130, 246, 0.14);
+  color: #3b82f6;
+}
+
+.fork-source-version {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-color);
+}
+
+.fork-link-btn {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--primary-color);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fork-link-btn:hover {
+  text-decoration: underline;
+}
+
+.fork-impact-panel {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--divider-color);
+  background: var(--hover-bg);
+}
+
+.fork-impact-panel.level-low,
+.fork-impact-panel.level-up-to-date {
+  border-color: rgba(16, 185, 129, 0.32);
+}
+
+.fork-impact-panel.level-medium {
+  border-color: rgba(245, 158, 11, 0.36);
+}
+
+.fork-impact-panel.level-high {
+  border-color: rgba(239, 68, 68, 0.36);
+}
+
+.fork-impact-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fork-impact-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.14);
+  color: #3b82f6;
+}
+
+.fork-impact-badge.level-low,
+.fork-impact-badge.level-up-to-date {
+  background: rgba(16, 185, 129, 0.14);
+  color: #10b981;
+}
+
+.fork-impact-badge.level-medium {
+  background: rgba(245, 158, 11, 0.16);
+  color: #d97706;
+}
+
+.fork-impact-badge.level-high {
+  background: rgba(239, 68, 68, 0.16);
+  color: #dc2626;
+}
+
+.fork-ignore-btn {
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--control-border);
+  background: var(--card-bg);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.fork-ignore-btn:hover {
+  color: var(--text-color);
+}
+
+.fork-impact-summary {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--text-color);
+  line-height: 1.5;
+}
+
+.fork-impact-reasons {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.fork-overlap-files {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #dc2626;
+  word-break: break-all;
 }
 
 .update-options-copy {

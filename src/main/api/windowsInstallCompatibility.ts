@@ -2,7 +2,14 @@ import { app } from 'electron'
 import { promises as fs } from 'fs'
 import path from 'path'
 import yaml from 'yaml'
-import { getGitHubReleaseUrl, GITHUB_LATEST_RELEASE_URL } from '@shared/updateSource'
+import {
+  FORK_OWNER,
+  FORK_REPO,
+  getGitHubReleaseUrl,
+  GITHUB_LATEST_RELEASE_URL,
+  UPSTREAM_OWNER,
+  UPSTREAM_REPO
+} from '@shared/updateSource'
 import { EXPECTED_ELECTRON_VERSION } from '../runtimeCompatibility'
 
 export const WINDOWS_APP_ID = 'top.z-tools'
@@ -123,10 +130,10 @@ export async function getWindowsInstallCompatibility(): Promise<WindowsInstallCo
 
   try {
     const updateConfig = yaml.parse(await fs.readFile(updateConfigPath, 'utf8'))
-    hasUpdateConfig =
-      updateConfig?.provider === 'github' &&
-      updateConfig?.owner === 'ZToolsCenter' &&
-      updateConfig?.repo === 'ZTools'
+    const isMyForkRepo = updateConfig?.owner === FORK_OWNER && updateConfig?.repo === FORK_REPO
+    const isUpstreamRepo =
+      updateConfig?.owner === UPSTREAM_OWNER && updateConfig?.repo === UPSTREAM_REPO
+    hasUpdateConfig = updateConfig?.provider === 'github' && (isMyForkRepo || isUpstreamRepo)
   } catch {
     hasUpdateConfig = false
   }

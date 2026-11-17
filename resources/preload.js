@@ -1380,6 +1380,12 @@ window.ztools = {
       await electron.ipcRenderer.invoke('internal:updater-start-update'),
     updaterSetAutoCheck: async (enabled) =>
       await electron.ipcRenderer.invoke('internal:updater-set-auto-check', enabled),
+    updaterGetPreferences: async () =>
+      await electron.ipcRenderer.invoke('internal:updater-get-preferences'),
+    updaterSetPreferences: async (prefs) =>
+      await electron.ipcRenderer.invoke('internal:updater-set-preferences', prefs),
+    updaterAnalyzeFork: async (forceRefresh) =>
+      await electron.ipcRenderer.invoke('internal:updater-analyze-fork', forceRefresh),
 
     // ==================== 数据同步 API ====================
     syncTestConnection: async (config) =>

@@ -110,19 +110,31 @@ class WindowsPlatformUpdater implements PlatformUpdaterService {
   }
 
   /**
-   * 启动 Windows 更新，便携版改为打开手动下载页面。
+   * 启动 Windows 更新，便携版改为打开对应下载源页面。
    * @param updateInfo 当前可用更新信息。
    * @returns 更新启动或下载页面打开结果。
    */
   public async startUpdate(updateInfo?: PlatformUpdateInfo): Promise<PlatformUpdateActionResult> {
     if (this.compatibility?.portable) {
-      await shell.openExternal(updateInfo?.releaseUrl || WINDOWS_RELEASE_URL)
-      return { success: true }
+      await shell.openExternal(
+        updateInfo?.downloadUrl || updateInfo?.releaseUrl || WINDOWS_RELEASE_URL
+      )
+      return { success: true, openedExternal: true }
     }
     if (this.updater) return this.updater.downloadAndInstall(updateInfo)
 
-    await shell.openExternal(updateInfo?.releaseUrl || WINDOWS_RELEASE_URL)
-    return { success: true, migrationRequired: true }
+    await shell.openExternal(
+      updateInfo?.downloadUrl || updateInfo?.releaseUrl || WINDOWS_RELEASE_URL
+    )
+    return { success: true, migrationRequired: true, openedExternal: true }
+  }
+
+  /**
+   * 重置标准更新器的下载缓存状态，便于切换下载源后重新下载。
+   * @returns 无返回值。
+   */
+  public resetDownloadState(): void {
+    this.updater?.resetDownloadState()
   }
 
   /**

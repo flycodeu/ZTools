@@ -99,8 +99,16 @@ class MacPlatformUpdater implements PlatformUpdaterService {
   public async startUpdate(updateInfo?: PlatformUpdateInfo): Promise<PlatformUpdateActionResult> {
     if (this.updater) return this.updater.downloadAndInstall(updateInfo)
 
-    await shell.openExternal(updateInfo?.releaseUrl || MAC_RELEASE_URL)
-    return { success: true, migrationRequired: true }
+    await shell.openExternal(updateInfo?.downloadUrl || updateInfo?.releaseUrl || MAC_RELEASE_URL)
+    return { success: true, migrationRequired: true, openedExternal: true }
+  }
+
+  /**
+   * 重置标准更新器的下载缓存状态，便于切换下载源后重新下载。
+   * @returns 无返回值。
+   */
+  public resetDownloadState(): void {
+    this.updater?.resetDownloadState()
   }
 
   /**

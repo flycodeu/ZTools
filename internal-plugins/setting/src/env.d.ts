@@ -555,9 +555,10 @@ declare global {
         syncGetConfig: () => Promise<{
           success: boolean
           config?: {
-            provider: 'official' | 'private'
+            provider: 'official' | 'private' | 'webdav'
             enabled: boolean
             serverUrl: string
+            remoteDir?: string
             syncInterval: number
             lastSyncTime: number
             deviceId?: string
@@ -650,10 +651,38 @@ declare global {
           success: boolean
           error?: string
         }>
+        syncTestWebdavConnection: (params: {
+          serverUrl: string
+          remoteDir?: string
+          username: string
+          password?: string
+        }) => Promise<{
+          success: boolean
+          serverUrl?: string
+          remoteDir?: string
+          error?: string
+        }>
+        syncLoginWebdav: (params: {
+          serverUrl: string
+          remoteDir?: string
+          username: string
+          password: string
+        }) => Promise<{
+          success: boolean
+          serverUrl?: string
+          remoteDir?: string
+          username?: string
+          error?: string
+        }>
+        syncLogoutWebdav: () => Promise<{
+          success: boolean
+          error?: string
+        }>
         syncSaveConfig: (config: {
-          provider?: 'official' | 'private'
+          provider?: 'official' | 'private' | 'webdav'
           enabled: boolean
           serverUrl: string
+          remoteDir?: string
           syncInterval: number
         }) => Promise<{
           success: boolean
@@ -666,8 +695,10 @@ declare global {
           success: boolean
           status?: {
             config?: {
+              provider?: 'official' | 'private' | 'webdav'
               enabled: boolean
               serverUrl: string
+              remoteDir?: string
               token: string
               refreshToken?: string
               syncInterval: number
@@ -676,9 +707,10 @@ declare global {
               username?: string
             } | null
             profile?: {
-              provider: 'official' | 'private'
+              provider: 'official' | 'private' | 'webdav'
               enabled: boolean
               serverUrl: string
+              remoteDir?: string
               syncInterval: number
               lastSyncTime: number
               deviceId?: string
@@ -702,6 +734,12 @@ declare global {
             privateSession?: {
               loggedIn: boolean
               serverUrl: string
+              username: string
+            }
+            webdavSession?: {
+              configured: boolean
+              serverUrl: string
+              remoteDir: string
               username: string
             }
           }

@@ -1,4 +1,9 @@
-import { OFFICIAL_SYNC_SERVER_URL, isOfficialSyncServerUrl } from '../../../shared/syncServerUrl'
+import {
+  DEFAULT_WEBDAV_REMOTE_DIR,
+  OFFICIAL_SYNC_SERVER_URL,
+  isOfficialSyncServerUrl,
+  normalizeWebdavRemoteDir
+} from '../../../shared/syncServerUrl'
 import {
   clearOfficialRejectedAccessToken,
   loadOfficialAccountSession,
@@ -11,25 +16,116 @@ import {
   type CredentialSession
 } from '../auth/credentialSessionService'
 import lmdbInstance, { storageManager } from '../lmdb/lmdbInstance'
-import type { SyncConfig } from './types'
+import type { SyncConfig, SyncProvider } from './types'
 
-export type SyncProvider = 'official' | 'private'
+export type { SyncProvider }
 
 export interface SyncProfile {
   provider: SyncProvider
   enabled: boolean
   serverUrl: string
+  remoteDir?: string
   syncInterval: number
   lastSyncTime: number
   deviceId?: string
 }
 
+/** 存储在账号数据库中的 WebDAV 会话配置（含加密后的密码密文）。 */
+export interface WebdavSyncSession {
+  serverUrl: string
+  remoteDir: string
+  username: string
+  password: string
+}
+
+interface StoredWebdavSessionRecord {
+  serverUrl: string
+  remoteDir: string
+  username: string
+  encryptedPassword: string
+  cipher: 'safeStorage' | 'plain'
+}
+
 const SYNC_PROFILE_DOCUMENT_ID = 'SYNC/profile'
 const PRIVATE_SYNC_SESSION_DOCUMENT_ID = 'SYNC/private-session'
+const WEBDAV_SYNC_SESSION_DOCUMENT_ID = 'SYNC/webdav-session'
 const LEGACY_SYNC_CONFIG_DOCUMENT_ID = 'SYNC/config'
 const MIGRATION_MARKER_DOCUMENT_ID = 'SYNC/separated-auth-migrated'
 
 const privateSessionService = new CredentialSessionService(PRIVATE_SYNC_SESSION_DOCUMENT_ID)
+
+/**
+ * 动态读取 Electron safeStorage（单元测试等纯 Node 环境无法导入 electron 时返回 null）。
+ * @returns 可用的 Electron SafeStorage 实例或 null。
+ */
+async function getElectronSafeStorage(): Promise<{
+  isEncryptionAvailable: () => boolean
+  encryptString: (plainText: string) => Buffer
+  decryptString: (encrypted: Buffer) => string
+} | null> {
+  try {
+    const mod = await import('electron')
+    return mod?.safeStorage ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 使用系统安全存储对 WebDAV 应用密码进行加密，非 Electron 环境降级为本地编码。
+ * @param password 明文密码或应用密码。
+ * @returns 加密后的密文及所用编码方式标记。
+ */
+async function protectWebdavPassword(password: string): Promise<{
+  encryptedPassword: string
+  cipher: 'safeStorage' | 'plain'
+}> {
+  if (!password) return { encryptedPassword: '', cipher: 'plain' }
+  try {
+    const storage = await getElectronSafeStorage()
+    if (storage?.isEncryptionAvailable?.()) {
+      return {
+        encryptedPassword: storage.encryptString(password).toString('base64'),
+        cipher: 'safeStorage'
+      }
+    }
+  } catch (error) {
+    console.warn('[Sync] safeStorage 加密 WebDAV 密码失败，回退到本地编码:', error)
+  }
+  return {
+    encryptedPassword: Buffer.from(password, 'utf8').toString('base64'),
+    cipher: 'plain'
+  }
+}
+
+/**
+ * 解密持久化保存的 WebDAV 应用密码。
+ * @param encryptedPassword 持久化记录中的密文。
+ * @param cipher 加密类型标记。
+ * @returns 解密后的明文密码；不可用或失败时返回空字符串。
+ */
+async function unprotectWebdavPassword(
+  encryptedPassword?: string,
+  cipher?: 'safeStorage' | 'plain'
+): Promise<string> {
+  if (!encryptedPassword) return ''
+  try {
+    const buffer = Buffer.from(encryptedPassword, 'base64')
+    if (cipher === 'safeStorage') {
+      const storage = await getElectronSafeStorage()
+      if (storage?.isEncryptionAvailable?.()) {
+        return storage.decryptString(buffer)
+      }
+      return ''
+    }
+    if (cipher === 'plain') {
+      return buffer.toString('utf8')
+    }
+  } catch (error) {
+    console.error('[Sync] 解密 WebDAV 密码失败:', error)
+  }
+  return ''
+}
 
 /**
  * 读取当前本地数据空间的同步配置。
@@ -50,18 +146,29 @@ export async function saveSyncProfile(input: Partial<SyncProfile>): Promise<Sync
   const currentDoc = await lmdbInstance.promises.get(SYNC_PROFILE_DOCUMENT_ID)
   const current = normalizeProfile(currentDoc?.data)
   const provider = input.provider || current.provider
-  // 切换到未配置的私服时保留空地址，禁止沿用官方服务地址。
-  const privateServerUrl =
+  // 切换到其他非官方服务时保留目标地址，禁止跨模式复用官方或另一种同步协议的地址。
+  const nextServerUrl =
     typeof input.serverUrl === 'string'
       ? input.serverUrl
-      : current.provider === 'private'
+      : current.provider === provider
         ? current.serverUrl
         : ''
+  const nextRemoteDir =
+    provider === 'webdav'
+      ? normalizeWebdavRemoteDir(
+          typeof input.remoteDir === 'string'
+            ? input.remoteDir
+            : current.provider === 'webdav'
+              ? current.remoteDir
+              : DEFAULT_WEBDAV_REMOTE_DIR
+        )
+      : undefined
   const next = normalizeProfile({
     ...current,
     ...input,
     provider,
-    serverUrl: provider === 'official' ? OFFICIAL_SYNC_SERVER_URL : privateServerUrl,
+    serverUrl: provider === 'official' ? OFFICIAL_SYNC_SERVER_URL : nextServerUrl,
+    ...(provider === 'webdav' ? { remoteDir: nextRemoteDir } : { remoteDir: undefined }),
     lastSyncTime: input.lastSyncTime ?? current.lastSyncTime
   })
   const result = await lmdbInstance.promises.put({
@@ -99,12 +206,122 @@ export function clearPrivateSyncSession(): Promise<CredentialSession | null> {
 }
 
 /**
- * 根据同步方式组合现有 SyncClient 所需的运行配置。
+ * 读取当前本地数据空间中保存的 WebDAV 会话及解密后的密码。
+ * @returns WebDAV 会话对象；尚未配置或不存在时返回 null。
+ */
+export async function loadWebdavSyncSession(): Promise<WebdavSyncSession | null> {
+  try {
+    const doc = await lmdbInstance.promises.get(WEBDAV_SYNC_SESSION_DOCUMENT_ID)
+    const raw = doc?.data as Partial<StoredWebdavSessionRecord> | undefined
+    if (!raw?.serverUrl || !raw?.username) return null
+    return {
+      serverUrl: raw.serverUrl,
+      remoteDir: normalizeWebdavRemoteDir(raw.remoteDir),
+      username: raw.username,
+      password: await unprotectWebdavPassword(raw.encryptedPassword, raw.cipher)
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 将 WebDAV 服务地址、目录、用户名及加密后的密码写入当前账号数据空间。
+ * @param session 要保存的 WebDAV 连接与凭据参数。
+ * @returns 持久化完成后的 WebDAV 会话。
+ * @throws 输入不完整或写入冲突超过重试次数时抛出错误。
+ */
+export async function saveWebdavSyncSession(
+  session: WebdavSyncSession
+): Promise<WebdavSyncSession> {
+  const serverUrl = session.serverUrl.trim()
+  const username = session.username.trim()
+  const password = session.password
+  const remoteDir = normalizeWebdavRemoteDir(session.remoteDir)
+  if (!serverUrl || !username || !password) {
+    throw new Error('WebDAV 配置与凭据不完整')
+  }
+
+  const protectedSecret = await protectWebdavPassword(password)
+  const record: StoredWebdavSessionRecord = {
+    serverUrl,
+    remoteDir,
+    username,
+    encryptedPassword: protectedSecret.encryptedPassword,
+    cipher: protectedSecret.cipher
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const currentDoc = await lmdbInstance.promises.get(WEBDAV_SYNC_SESSION_DOCUMENT_ID)
+    const result = await lmdbInstance.promises.put({
+      _id: WEBDAV_SYNC_SESSION_DOCUMENT_ID,
+      _rev: currentDoc?._rev,
+      data: record
+    })
+    if (result?.ok) {
+      return { serverUrl, remoteDir, username, password }
+    }
+    if (result?.name !== 'conflict') {
+      throw new Error(result?.message || '保存 WebDAV 会话失败')
+    }
+  }
+  throw new Error('保存 WebDAV 会话冲突，请重试')
+}
+
+/**
+ * 清除 WebDAV 密码，但保留服务器地址、目录和用户名供下次重新输入密码使用。
+ * @returns 清理密码后的会话；原会话不存在时返回 null。
+ */
+export async function clearWebdavSyncSession(): Promise<WebdavSyncSession | null> {
+  const current = await loadWebdavSyncSession()
+  if (!current) return null
+
+  const currentDoc = await lmdbInstance.promises.get(WEBDAV_SYNC_SESSION_DOCUMENT_ID)
+  const nextRecord: StoredWebdavSessionRecord = {
+    serverUrl: current.serverUrl,
+    remoteDir: current.remoteDir,
+    username: current.username,
+    encryptedPassword: '',
+    cipher: 'plain'
+  }
+  await lmdbInstance.promises.put({
+    _id: WEBDAV_SYNC_SESSION_DOCUMENT_ID,
+    _rev: currentDoc?._rev,
+    data: nextRecord
+  })
+  return { ...current, password: '' }
+}
+
+/**
+ * 根据同步方式组合现有 SyncClient 或 WebDAV 引擎所需的运行配置。
  * @param profile 可选的同步配置；省略时读取当前数据空间配置。
- * @returns 包含活动服务凭据的 SyncClient 配置。
+ * @returns 包含活动服务凭据的同步运行配置。
  */
 export async function resolveSyncRuntimeConfig(profile?: SyncProfile): Promise<SyncConfig> {
   const activeProfile = profile || (await loadSyncProfile())
+
+  if (activeProfile.provider === 'webdav') {
+    const webdavSession = await loadWebdavSyncSession()
+    const remoteDir = normalizeWebdavRemoteDir(activeProfile.remoteDir ?? webdavSession?.remoteDir)
+    const sessionMatches = Boolean(
+      webdavSession &&
+      webdavSession.serverUrl === activeProfile.serverUrl &&
+      webdavSession.remoteDir === remoteDir
+    )
+    return {
+      provider: 'webdav',
+      enabled: Boolean(activeProfile.enabled && sessionMatches && webdavSession?.password),
+      serverUrl: activeProfile.serverUrl,
+      remoteDir,
+      token: '',
+      syncInterval: activeProfile.syncInterval,
+      lastSyncTime: activeProfile.lastSyncTime,
+      deviceId: activeProfile.deviceId || '',
+      username: sessionMatches ? webdavSession?.username || '' : '',
+      password: sessionMatches ? webdavSession?.password || '' : ''
+    }
+  }
+
   const session =
     activeProfile.provider === 'official'
       ? await loadOfficialAccountSession()
@@ -114,6 +331,7 @@ export async function resolveSyncRuntimeConfig(profile?: SyncProfile): Promise<S
     (activeProfile.provider === 'official' || session.serverUrl === activeProfile.serverUrl)
   )
   return {
+    provider: activeProfile.provider,
     enabled: Boolean(activeProfile.enabled && sessionMatches && session?.token),
     serverUrl: activeProfile.serverUrl,
     token: sessionMatches ? session?.token || '' : '',
@@ -222,8 +440,9 @@ export async function migrateLegacySyncConfig(): Promise<void> {
  */
 function normalizeProfile(value: unknown): SyncProfile {
   const source = value && typeof value === 'object' ? (value as Partial<SyncProfile>) : {}
-  const provider: SyncProvider = source.provider === 'private' ? 'private' : 'official'
-  return {
+  const provider: SyncProvider =
+    source.provider === 'private' || source.provider === 'webdav' ? source.provider : 'official'
+  const profile: SyncProfile = {
     provider,
     enabled: Boolean(source.enabled),
     serverUrl:
@@ -240,4 +459,8 @@ function normalizeProfile(value: unknown): SyncProfile {
         : 0,
     deviceId: typeof source.deviceId === 'string' ? source.deviceId : undefined
   }
+  if (provider === 'webdav') {
+    profile.remoteDir = normalizeWebdavRemoteDir(source.remoteDir)
+  }
+  return profile
 }

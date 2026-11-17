@@ -2,18 +2,26 @@
  * WebSocket 同步系统类型定义
  */
 
+import type { EventEmitter } from 'events'
+import type { SyncRetryStatus } from './syncTaskStore'
+
+export type SyncProvider = 'official' | 'private' | 'webdav'
+
 /**
  * 同步配置
  */
 export interface SyncConfig {
+  provider?: SyncProvider
   enabled: boolean
-  serverUrl: string // WebSocket 服务器地址 ws://host:port
+  serverUrl: string // WebSocket 服务器地址或 WebDAV HTTP(S) 服务地址
   token: string // JWT token（加密存储）
   refreshToken?: string // 刷新 token（单次使用，服务端换发后更新）
-  syncInterval: number // 心跳间隔（秒）
+  syncInterval: number // 心跳或轮询间隔（秒）
   lastSyncTime: number
   deviceId: string
-  username?: string // 显示用
+  username?: string // 显示用或 WebDAV 账号
+  password?: string // WebDAV 解密后的运行时密码，禁止回传渲染层
+  remoteDir?: string // WebDAV 远端同步子目录（默认 ZTools）
 }
 
 /**
@@ -127,4 +135,57 @@ export interface SyncResult {
   uploaded: number
   downloaded: number
   errors: number
+}
+
+/**
+ * WebDAV 远端同步索引清单中记录的单篇文档元数据。
+ */
+export interface WebdavDocManifestEntry {
+  rev: string
+  parentRev?: string | null
+  revisionHistory?: string[]
+  deleted: boolean
+  timestamp: number
+  docHash: string
+  docPath: string
+}
+
+/**
+ * WebDAV 远端同步索引清单中记录的二进制附件元数据。
+ */
+export interface WebdavBlobManifestEntry {
+  digest: string
+  contentType: string
+  length: number
+  blobPath: string
+}
+
+/**
+ * 存放在 WebDAV 目标目录根下的 `manifest.json` 全局增量索引结构。
+ */
+export interface WebdavSyncManifest {
+  schemaVersion: 1
+  syncEpoch: number
+  serverSeq: number
+  updatedAt: number
+  docs: Record<string, WebdavDocManifestEntry>
+  blobs: Record<string, WebdavBlobManifestEntry>
+}
+
+/**
+ * 供 SyncAPI 统一调度的同步引擎接口，同时兼容 WebSocket 同步与 WebDAV 同步。
+ */
+export interface ISyncEngine extends EventEmitter {
+  getState(): SyncState
+  getRetryStatus(): SyncRetryStatus
+  retryNow(): void
+  start(config: SyncConfig): void
+  stop(): void
+  performSync(): void
+  forcePushAll(): void
+  getPendingDocumentCount(config?: SyncConfig | null): number
+  resetLocalSyncState(config?: SyncConfig | null): {
+    documentsQueued: number
+    tasksCleared: number
+  }
 }

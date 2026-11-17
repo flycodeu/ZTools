@@ -9,6 +9,7 @@ import {
   ClientMessage,
   ServerMessage,
   FullChangeEntry,
+  ISyncEngine,
   RemoteCheckpointPayload
 } from './types'
 import { SyncCheckpoint, SyncCheckpointStore } from './syncCheckpointStore'
@@ -39,7 +40,7 @@ const SYNC_PROTOCOL_VERSION = 2
 /** 需要同步的文档前缀白名单 */
 export const SYNC_PREFIXES = ACCOUNT_SYNC_PREFIXES
 
-export class SyncClient extends EventEmitter {
+export class SyncClient extends EventEmitter implements ISyncEngine {
   private ws: WebSocket | null = null
   private remotePullSeq: number = 0
   private localPushSeq: number = 0

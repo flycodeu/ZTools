@@ -2,16 +2,22 @@
 import { onActivated, onMounted, onUnmounted, ref, computed } from 'vue'
 import { useToast, DetailPanel } from '@/components'
 import { ONLINE_SYNC_SERVER_URL } from '@/composables/useZToolsAccount'
-import { normalizeSyncServerUrl } from '@shared/syncServerUrl'
+import {
+  DEFAULT_WEBDAV_REMOTE_DIR,
+  normalizeSyncServerUrl,
+  normalizeWebdavRemoteDir,
+  normalizeWebdavServerUrl
+} from '@shared/syncServerUrl'
 
 const { success, error, warning, confirm } = useToast()
-type DeploymentMode = 'official' | 'private'
+type DeploymentMode = 'official' | 'private' | 'webdav'
 
 // 同步配置
 const syncEnabled = ref(false)
 const config = ref({
   provider: 'official' as DeploymentMode,
   serverUrl: ONLINE_SYNC_SERVER_URL,
+  remoteDir: DEFAULT_WEBDAV_REMOTE_DIR,
   syncInterval: 30,
   lastSyncTime: 0
 })
@@ -26,11 +32,25 @@ const privateLogoutLoading = ref(false)
 const privateConnectionTesting = ref(false)
 const privateConnectionMessage = ref('')
 const privateConnectionSucceeded = ref(false)
+const webdavFormDirty = ref(false)
+const webdavServerUrl = ref('')
+const webdavRemoteDir = ref(DEFAULT_WEBDAV_REMOTE_DIR)
+const webdavUsername = ref('')
+const webdavPassword = ref('')
+const webdavLoginLoading = ref(false)
+const webdavLogoutLoading = ref(false)
+const webdavConnectionTesting = ref(false)
+const webdavConnectionMessage = ref('')
+const webdavConnectionSucceeded = ref(false)
 const officialAccountLoggedIn = ref(false)
 const officialAccountUsername = ref('')
 const privateSessionLoggedIn = ref(false)
 const savedPrivateServerUrl = ref('')
 const savedPrivateUsername = ref('')
+const webdavSessionConfigured = ref(false)
+const savedWebdavServerUrl = ref('')
+const savedWebdavRemoteDir = ref(DEFAULT_WEBDAV_REMOTE_DIR)
+const savedWebdavUsername = ref('')
 
 // 是否已登录（有 token）
 const loggedIn = ref(false)
@@ -94,6 +114,15 @@ const stateLabel = computed(() => stateLabels[syncState.value] || syncState.valu
 const stateColor = computed(() => stateColors[syncState.value] || 'var(--text-secondary)')
 const isConnected = computed(() => syncState.value === 'live')
 const isPrivateMode = computed(() => deploymentMode.value === 'private')
+const isWebdavMode = computed(() => deploymentMode.value === 'webdav')
+const isLikelyWebdavInput = computed(() => {
+  const url = privateServerUrl.value.trim().toLowerCase()
+  return (
+    privateConnectionMessage.value.includes('子路径') ||
+    url.includes('jianguoyun.com') ||
+    url.includes('/dav')
+  )
+})
 const retryPendingTotal = computed(() => {
   const status = retryStatus.value
   if (!status) return 0
@@ -125,7 +154,10 @@ const lastSyncTime = computed(() => {
  */
 function applySyncStatus(status: any): void {
   const nextConfig = status?.profile || status?.config || null
-  const nextMode: DeploymentMode = nextConfig?.provider === 'private' ? 'private' : 'official'
+  const nextMode: DeploymentMode =
+    nextConfig?.provider === 'private' || nextConfig?.provider === 'webdav'
+      ? nextConfig.provider
+      : 'official'
 
   if (nextConfig) {
     deploymentMode.value = nextMode
@@ -136,6 +168,9 @@ function applySyncStatus(status: any): void {
   config.value.provider = nextMode
   config.value.serverUrl =
     nextMode === 'official' ? ONLINE_SYNC_SERVER_URL : nextConfig?.serverUrl || ''
+  config.value.remoteDir = normalizeWebdavRemoteDir(
+    nextConfig?.remoteDir ?? status?.webdavSession?.remoteDir
+  )
   config.value.syncInterval = nextConfig?.syncInterval || 30
   config.value.lastSyncTime = status?.lastSyncTime || nextConfig?.lastSyncTime || 0
   syncState.value = status?.state || 'disconnected'
@@ -148,10 +183,19 @@ function applySyncStatus(status: any): void {
   privateSessionLoggedIn.value = Boolean(status?.privateSession?.loggedIn)
   savedPrivateServerUrl.value = status?.privateSession?.serverUrl || ''
   savedPrivateUsername.value = status?.privateSession?.username || ''
+  webdavSessionConfigured.value = Boolean(status?.webdavSession?.configured)
+  savedWebdavServerUrl.value = status?.webdavSession?.serverUrl || ''
+  savedWebdavRemoteDir.value = normalizeWebdavRemoteDir(status?.webdavSession?.remoteDir)
+  savedWebdavUsername.value = status?.webdavSession?.username || ''
 
   if (!privateFormDirty.value) {
     privateServerUrl.value = savedPrivateServerUrl.value
     privateUsername.value = savedPrivateUsername.value
+  }
+  if (!webdavFormDirty.value) {
+    webdavServerUrl.value = savedWebdavServerUrl.value
+    webdavRemoteDir.value = savedWebdavRemoteDir.value
+    webdavUsername.value = savedWebdavUsername.value
   }
   updateSelectedLoginState()
 }
@@ -164,6 +208,11 @@ function updateSelectedLoginState(): void {
   if (deploymentMode.value === 'official') {
     loggedIn.value = officialAccountLoggedIn.value
     loggedUser.value = officialAccountUsername.value
+    return
+  }
+  if (deploymentMode.value === 'webdav') {
+    loggedIn.value = webdavSessionConfigured.value
+    loggedUser.value = savedWebdavUsername.value
     return
   }
   loggedIn.value = privateSessionLoggedIn.value
@@ -181,37 +230,104 @@ function markPrivateFormDirty(): void {
 }
 
 /**
+ * 标记 WebDAV 表单已被用户编辑，防止后台轮询覆盖正在修改的地址或目录。
+ * @returns 无返回值。
+ */
+function markWebdavFormDirty(): void {
+  webdavFormDirty.value = true
+  webdavConnectionMessage.value = ''
+  webdavConnectionSucceeded.value = false
+}
+
+/**
+ * 在 WebDAV 表单中一键填入坚果云标准 WebDAV 地址及推荐同步子目录。
+ * @returns 无返回值。
+ */
+function fillNutstorePreset(): void {
+  webdavServerUrl.value = 'https://dav.jianguoyun.com/dav/'
+  if (!webdavRemoteDir.value.trim()) {
+    webdavRemoteDir.value = DEFAULT_WEBDAV_REMOTE_DIR
+  }
+  markWebdavFormDirty()
+}
+
+/**
+ * 从私有部署输入框直接切换至 WebDAV 模式并继承当前填写的地址与用户名，方便用户纠偏。
+ * @returns 模式切换与预填完成后结束的 Promise。
+ */
+async function switchFromPrivateToWebdav(): Promise<void> {
+  const prefillUrl = privateServerUrl.value.trim()
+  const prefillUser = privateUsername.value.trim()
+  await handleDeploymentModeChange('webdav', true)
+  if (deploymentMode.value === 'webdav') {
+    if (prefillUrl) webdavServerUrl.value = prefillUrl
+    if (prefillUser) webdavUsername.value = prefillUser
+    webdavRemoteDir.value = webdavRemoteDir.value || DEFAULT_WEBDAV_REMOTE_DIR
+    markWebdavFormDirty()
+  }
+}
+
+/**
+ * 返回同步服务类型对应的中文标签。
+ * @param mode 同步服务类型枚举值。
+ * @returns 中文界面名称。
+ */
+function getProviderLabel(mode: DeploymentMode): string {
+  if (mode === 'private') return '私有部署'
+  if (mode === 'webdav') return 'WebDAV'
+  return '官方服务'
+}
+
+/**
  * 提示用户确认并持久化目标同步服务，成功后再切换页面状态。
  * @param mode 用户选择的同步服务类型。
+ * @param skipConfirm 是否跳过二次弹窗（用于从错误提示快速纠偏切换到 WebDAV）。
  * @returns 服务模式切换完成后的 Promise。
  */
-async function handleDeploymentModeChange(mode: DeploymentMode): Promise<void> {
-  if (mode === deploymentMode.value || privateLoginLoading.value || deploymentSwitching.value) {
+async function handleDeploymentModeChange(
+  mode: DeploymentMode,
+  skipConfirm = false
+): Promise<void> {
+  if (
+    mode === deploymentMode.value ||
+    privateLoginLoading.value ||
+    webdavLoginLoading.value ||
+    deploymentSwitching.value
+  ) {
     return
   }
 
   deploymentSwitching.value = true
   try {
-    const targetLabel = mode === 'private' ? '私有部署' : '官方服务'
-    const confirmed = await confirm({
-      title: '切换同步服务',
-      message: syncEnabled.value
-        ? `切换到${targetLabel}后，当前同步连接将停止。官方账号与私有服务账号相互独立，请确认目标服务已登录后重新开启同步。`
-        : `确定切换到${targetLabel}吗？官方账号与私有服务账号相互独立，切换后请确认目标服务的登录状态。`,
-      type: 'warning',
-      confirmText: `切换到${targetLabel}`,
-      cancelText: '取消'
-    })
-    if (!confirmed) return
+    const targetLabel = getProviderLabel(mode)
+    if (!skipConfirm) {
+      const confirmed = await confirm({
+        title: '切换同步服务',
+        message: syncEnabled.value
+          ? `切换到${targetLabel}后，当前同步连接将停止。各同步服务的账号与凭据相互独立，请确认目标服务配置完成后重新开启同步。`
+          : `确定切换到${targetLabel}吗？官方服务、私有部署与 WebDAV 配置相互独立，切换后请确认目标服务认证状态。`,
+        type: 'warning',
+        confirmText: `切换到${targetLabel}`,
+        cancelText: '取消'
+      })
+      if (!confirmed) return
+    }
 
-    // 将服务选择和关闭状态一次性保存；主进程会在保存成功后停止旧同步客户端。
+    // 将服务选择和关闭状态一次性保存；主进程会在保存成功后停止或切换同步客户端。
     const targetServerUrl =
-      mode === 'official' ? ONLINE_SYNC_SERVER_URL : savedPrivateServerUrl.value
+      mode === 'official'
+        ? ONLINE_SYNC_SERVER_URL
+        : mode === 'webdav'
+          ? savedWebdavServerUrl.value
+          : savedPrivateServerUrl.value
     const result = await window.ztools.internal.syncSaveConfig({
       provider: mode,
       enabled: false,
       serverUrl: targetServerUrl,
-      syncInterval: config.value.syncInterval
+      ...(mode === 'webdav'
+        ? { remoteDir: savedWebdavRemoteDir.value || DEFAULT_WEBDAV_REMOTE_DIR }
+        : {}),
+      syncInterval: mode === 'webdav' ? Math.max(config.value.syncInterval || 60, 60) : 30
     })
     if (!result.success) throw new Error(result.error || '保存同步服务失败')
 
@@ -224,11 +340,20 @@ async function handleDeploymentModeChange(mode: DeploymentMode): Promise<void> {
     privateConnectionMessage.value = ''
     privateConnectionSucceeded.value = false
     privatePassword.value = ''
+    webdavConnectionMessage.value = ''
+    webdavConnectionSucceeded.value = false
+    webdavPassword.value = ''
 
     if (mode === 'private' && !savedPrivateServerUrl.value) {
       privateServerUrl.value = ''
       privateUsername.value = ''
       privateFormDirty.value = false
+    }
+    if (mode === 'webdav' && !savedWebdavServerUrl.value) {
+      webdavServerUrl.value = ''
+      webdavRemoteDir.value = DEFAULT_WEBDAV_REMOTE_DIR
+      webdavUsername.value = ''
+      webdavFormDirty.value = false
     }
     updateSelectedLoginState()
     success(`已切换到${targetLabel}，同步保持关闭`)
@@ -376,6 +501,160 @@ async function handlePrivateLogout(): Promise<void> {
     error(`注销失败：${err.message}`)
   } finally {
     privateLogoutLoading.value = false
+  }
+}
+
+/**
+ * 校验 WebDAV 表单连接参数，支持带子路径地址与自定义同步子目录。
+ * @returns 规范化后的连接参数。
+ * @throws 地址、目录、用户名或密码为空/不合法时抛出错误。
+ */
+function validateWebdavForm(): {
+  serverUrl: string
+  remoteDir: string
+  username: string
+} {
+  const serverUrl = normalizeWebdavServerUrl(webdavServerUrl.value)
+  const remoteDir = normalizeWebdavRemoteDir(webdavRemoteDir.value)
+  const username = webdavUsername.value.trim()
+  if (!username) throw new Error('请填写 WebDAV 用户名')
+  if (!webdavPassword.value) throw new Error('请填写密码或应用密码')
+  return { serverUrl, remoteDir, username }
+}
+
+/**
+ * 测试 WebDAV 服务器连接（执行 PROPFIND 认证与同步子目录读写准备检查）。
+ * @returns 测试连接完成后的 Promise。
+ */
+async function handleWebdavConnectionTest(): Promise<void> {
+  webdavConnectionTesting.value = true
+  webdavConnectionMessage.value = ''
+  webdavConnectionSucceeded.value = false
+  try {
+    const serverUrl = normalizeWebdavServerUrl(webdavServerUrl.value)
+    const remoteDir = normalizeWebdavRemoteDir(webdavRemoteDir.value)
+    const username = webdavUsername.value.trim()
+    if (!username) throw new Error('请先填写用户名')
+    if (!webdavPassword.value) throw new Error('请先填写密码或应用密码')
+
+    const result = await window.ztools.internal.syncTestWebdavConnection({
+      serverUrl,
+      remoteDir,
+      username,
+      password: webdavPassword.value
+    })
+    if (!result.success) throw new Error(result.error || 'WebDAV 连接失败')
+
+    webdavServerUrl.value = result.serverUrl || serverUrl
+    webdavRemoteDir.value = result.remoteDir || remoteDir
+    webdavConnectionSucceeded.value = true
+    webdavConnectionMessage.value = `连接成功，已就绪同步目录 /${webdavRemoteDir.value}`
+  } catch (err: any) {
+    webdavConnectionMessage.value = err.message
+  } finally {
+    webdavConnectionTesting.value = false
+  }
+}
+
+/**
+ * 验证并加密保存 WebDAV 连接凭据；若服务端目标发生变化则自动重置该目标的本地同步游标。
+ * @returns 保存与状态刷新完成后结束的 Promise。
+ */
+async function handleWebdavLogin(): Promise<void> {
+  webdavLoginLoading.value = true
+  webdavConnectionMessage.value = ''
+  try {
+    const { serverUrl, remoteDir, username } = validateWebdavForm()
+    const login = await window.ztools.internal.syncLoginWebdav({
+      serverUrl,
+      remoteDir,
+      username,
+      password: webdavPassword.value
+    })
+    if (!login.success) throw new Error(login.error || 'WebDAV 登录验证失败')
+
+    const targetUrl = login.serverUrl || serverUrl
+    const targetDir = login.remoteDir || remoteDir
+    const serverChanged =
+      savedWebdavServerUrl.value !== targetUrl || savedWebdavRemoteDir.value !== targetDir
+    const nextInterval = Math.max(config.value.syncInterval || 60, 15)
+
+    const saved = await window.ztools.internal.syncSaveConfig({
+      provider: 'webdav',
+      enabled: false,
+      serverUrl: targetUrl,
+      remoteDir: targetDir,
+      syncInterval: nextInterval
+    })
+    if (!saved.success) throw new Error(saved.error || '保存 WebDAV 配置失败')
+
+    // 若切换了 WebDAV 服务地址或同步子目录，先重置该目标本地进度以便完整同步现有数据。
+    if (serverChanged) {
+      const reset = await window.ztools.internal.syncResetLocalSyncState()
+      if (!reset.success) {
+        warning(`已保存配置，但重置本机同步状态失败：${reset.error || '未知错误'}`)
+      }
+    }
+
+    webdavSessionConfigured.value = true
+    savedWebdavServerUrl.value = targetUrl
+    savedWebdavRemoteDir.value = targetDir
+    savedWebdavUsername.value = username
+    webdavServerUrl.value = targetUrl
+    webdavRemoteDir.value = targetDir
+    webdavUsername.value = username
+    webdavPassword.value = ''
+    webdavFormDirty.value = false
+    webdavConnectionSucceeded.value = true
+    webdavConnectionMessage.value = '已保存凭据'
+    updateSelectedLoginState()
+    success('WebDAV 服务认证成功，请开启右上角同步开关即可开始同步')
+    await refreshSyncStatus()
+  } catch (err: any) {
+    error(`WebDAV 验证失败：${err.message}`)
+  } finally {
+    webdavPassword.value = ''
+    webdavLoginLoading.value = false
+  }
+}
+
+/**
+ * 清除 WebDAV 持久化密码并停止后台同步，保留服务器地址和用户名便于重新登录。
+ * @returns 清理完成后结束的 Promise。
+ */
+async function handleWebdavLogout(): Promise<void> {
+  const confirmed = await confirm({
+    title: '退出 WebDAV 同步',
+    message: '退出后会停止 WebDAV 自动同步并清除本地加密保存的应用密码，本地文档与附件不会丢失。',
+    type: 'danger',
+    confirmText: '确认退出',
+    cancelText: '取消'
+  })
+  if (!confirmed) return
+
+  webdavLogoutLoading.value = true
+  try {
+    const result = await window.ztools.internal.syncLogoutWebdav()
+    if (!result.success) throw new Error(result.error || '退出失败')
+
+    syncEnabled.value = false
+    syncState.value = 'disconnected'
+    webdavSessionConfigured.value = false
+    loggedIn.value = false
+    webdavPassword.value = ''
+    webdavConnectionMessage.value = ''
+    webdavConnectionSucceeded.value = false
+    webdavFormDirty.value = false
+    webdavServerUrl.value = savedWebdavServerUrl.value
+    webdavRemoteDir.value = savedWebdavRemoteDir.value
+    webdavUsername.value = savedWebdavUsername.value
+
+    await refreshSyncStatus()
+    success('已退出 WebDAV 同步')
+  } catch (err: any) {
+    error(`退出失败：${err.message}`)
+  } finally {
+    webdavLogoutLoading.value = false
   }
 }
 
@@ -732,7 +1011,13 @@ async function handleSyncToggle(): Promise<void> {
     }
 
     if (syncEnabled.value && !loggedIn.value) {
-      warning(isPrivateMode.value ? '请先登录私有同步服务器' : '请先通过左下角登录 ZTools 账号')
+      warning(
+        isWebdavMode.value
+          ? '请先配置并登录 WebDAV 服务'
+          : isPrivateMode.value
+            ? '请先登录私有同步服务器'
+            : '请先通过左下角登录 ZTools 账号'
+      )
       syncEnabled.value = false
       return
     }
@@ -744,9 +1029,16 @@ async function handleSyncToggle(): Promise<void> {
     const result = await window.ztools.internal.syncSaveConfig({
       provider: deploymentMode.value,
       enabled: syncEnabled.value,
-      serverUrl: isPrivateMode.value
-        ? normalizeSyncServerUrl(privateServerUrl.value || savedPrivateServerUrl.value)
-        : ONLINE_SYNC_SERVER_URL,
+      serverUrl: isWebdavMode.value
+        ? normalizeWebdavServerUrl(webdavServerUrl.value || savedWebdavServerUrl.value)
+        : isPrivateMode.value
+          ? normalizeSyncServerUrl(privateServerUrl.value || savedPrivateServerUrl.value)
+          : ONLINE_SYNC_SERVER_URL,
+      ...(isWebdavMode.value
+        ? {
+            remoteDir: normalizeWebdavRemoteDir(webdavRemoteDir.value || savedWebdavRemoteDir.value)
+          }
+        : {}),
       syncInterval: config.value.syncInterval
     })
     if (!result.success) {
@@ -913,9 +1205,15 @@ onUnmounted(() => {
             role="tab"
             data-testid="sync-mode-official"
             class="tab-btn"
-            :class="{ active: !isPrivateMode }"
-            :aria-selected="!isPrivateMode"
-            :disabled="deploymentSwitching || privateLoginLoading || privateLogoutLoading"
+            :class="{ active: deploymentMode === 'official' }"
+            :aria-selected="deploymentMode === 'official'"
+            :disabled="
+              deploymentSwitching ||
+              privateLoginLoading ||
+              privateLogoutLoading ||
+              webdavLoginLoading ||
+              webdavLogoutLoading
+            "
             @click="handleDeploymentModeChange('official')"
           >
             官方服务
@@ -927,10 +1225,34 @@ onUnmounted(() => {
             class="tab-btn"
             :class="{ active: isPrivateMode }"
             :aria-selected="isPrivateMode"
-            :disabled="deploymentSwitching || privateLoginLoading || privateLogoutLoading"
+            :disabled="
+              deploymentSwitching ||
+              privateLoginLoading ||
+              privateLogoutLoading ||
+              webdavLoginLoading ||
+              webdavLogoutLoading
+            "
             @click="handleDeploymentModeChange('private')"
           >
             私有部署
+          </button>
+          <button
+            type="button"
+            role="tab"
+            data-testid="sync-mode-webdav"
+            class="tab-btn"
+            :class="{ active: isWebdavMode }"
+            :aria-selected="isWebdavMode"
+            :disabled="
+              deploymentSwitching ||
+              privateLoginLoading ||
+              privateLogoutLoading ||
+              webdavLoginLoading ||
+              webdavLogoutLoading
+            "
+            @click="handleDeploymentModeChange('webdav')"
+          >
+            WebDAV
           </button>
         </div>
         <div class="header-toggle">
@@ -939,7 +1261,9 @@ onUnmounted(() => {
             <input
               v-model="syncEnabled"
               type="checkbox"
-              :disabled="!loggedIn || deploymentSwitching || privateLogoutLoading"
+              :disabled="
+                !loggedIn || deploymentSwitching || privateLogoutLoading || webdavLogoutLoading
+              "
               @change="handleSyncToggle"
             />
             <span class="toggle-slider"></span>
@@ -948,13 +1272,137 @@ onUnmounted(() => {
       </div>
 
       <div class="service-settings" data-testid="sync-service-settings">
-        <div v-if="!isPrivateMode" class="service-description">
+        <div v-if="deploymentMode === 'official'" class="service-description">
           <span>使用 ZTools 官方同步服务</span>
           <span>{{ loggedIn ? `当前账号：${loggedUser}` : '请通过左下角登录 ZTools 账号' }}</span>
         </div>
 
         <div
-          v-if="isPrivateMode && privateSessionLoggedIn"
+          v-else-if="isWebdavMode && webdavSessionConfigured"
+          class="private-session-summary"
+          data-testid="webdav-sync-session"
+        >
+          <div class="private-session-details">
+            <div class="private-session-item">
+              <span class="private-session-label">WebDAV 地址与目录</span>
+              <span class="private-session-value" data-testid="webdav-sync-current-server">
+                {{ savedWebdavServerUrl }} / {{ savedWebdavRemoteDir }}
+              </span>
+            </div>
+            <div class="private-session-item">
+              <span class="private-session-label">当前认证账号</span>
+              <span class="private-session-value" data-testid="webdav-sync-current-user">
+                {{ savedWebdavUsername }}
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            data-testid="webdav-sync-logout"
+            class="btn btn-sm private-logout-button"
+            :disabled="webdavLogoutLoading"
+            @click="handleWebdavLogout"
+          >
+            {{ webdavLogoutLoading ? '退出中...' : '修改/退出' }}
+          </button>
+        </div>
+
+        <form
+          v-else-if="isWebdavMode"
+          class="private-login-form"
+          @submit.prevent="handleWebdavLogin"
+        >
+          <div class="webdav-preset-bar">
+            <span class="webdav-hint">
+              支持坚果云、Nextcloud、Alist 等含子路径的 WebDAV 网盘（坚果云请使用第三方应用密码）
+            </span>
+            <button type="button" class="btn btn-sm" @click="fillNutstorePreset">
+              填入坚果云地址
+            </button>
+          </div>
+          <div class="private-field private-server-field">
+            <label for="webdav-sync-server">服务器地址（支持子路径，如 /dav/）</label>
+            <div class="private-input-action">
+              <input
+                id="webdav-sync-server"
+                v-model.trim="webdavServerUrl"
+                data-testid="webdav-sync-server"
+                class="input"
+                type="url"
+                inputmode="url"
+                autocomplete="url"
+                placeholder="https://dav.jianguoyun.com/dav/"
+                @input="markWebdavFormDirty"
+              />
+              <button
+                type="button"
+                class="btn btn-sm"
+                :disabled="webdavConnectionTesting || !webdavServerUrl"
+                @click="handleWebdavConnectionTest"
+              >
+                {{ webdavConnectionTesting ? '测试中...' : '测试连接' }}
+              </button>
+            </div>
+          </div>
+          <div class="private-field private-server-field">
+            <label for="webdav-sync-remote-dir">远端同步子目录（将自动创建，默认 ZTools）</label>
+            <input
+              id="webdav-sync-remote-dir"
+              v-model.trim="webdavRemoteDir"
+              data-testid="webdav-sync-remote-dir"
+              class="input"
+              type="text"
+              placeholder="ZTools"
+              @input="markWebdavFormDirty"
+            />
+          </div>
+          <div class="private-field">
+            <label for="webdav-sync-username">用户名</label>
+            <input
+              id="webdav-sync-username"
+              v-model.trim="webdavUsername"
+              data-testid="webdav-sync-username"
+              class="input"
+              type="text"
+              autocomplete="username"
+              placeholder="WebDAV 账号（如邮箱）"
+              @input="markWebdavFormDirty"
+            />
+          </div>
+          <div class="private-field">
+            <label for="webdav-sync-password">应用密码</label>
+            <input
+              id="webdav-sync-password"
+              v-model="webdavPassword"
+              data-testid="webdav-sync-password"
+              class="input"
+              type="password"
+              autocomplete="current-password"
+              placeholder="输入应用密码"
+              @input="markWebdavFormDirty"
+            />
+          </div>
+          <div class="private-login-actions">
+            <span
+              v-if="webdavConnectionMessage"
+              class="connection-message"
+              :class="{ success: webdavConnectionSucceeded }"
+            >
+              {{ webdavConnectionMessage }}
+            </span>
+            <button
+              type="submit"
+              data-testid="webdav-sync-login"
+              class="btn btn-solid btn-sm"
+              :disabled="webdavLoginLoading"
+            >
+              {{ webdavLoginLoading ? '验证中...' : '保存并登录' }}
+            </button>
+          </div>
+        </form>
+
+        <div
+          v-else-if="isPrivateMode && privateSessionLoggedIn"
           class="private-session-summary"
           data-testid="private-sync-session"
         >
@@ -1047,6 +1495,14 @@ onUnmounted(() => {
               {{ privateConnectionMessage }}
             </span>
             <button
+              v-if="isLikelyWebdavInput"
+              type="button"
+              class="btn btn-sm webdav-switch-hint-btn"
+              @click="switchFromPrivateToWebdav"
+            >
+              改用 WebDAV 模式
+            </button>
+            <button
               type="submit"
               data-testid="private-sync-login"
               class="btn btn-solid btn-sm"
@@ -1076,7 +1532,11 @@ onUnmounted(() => {
               </span>
             </div>
             <div class="setting-control">
-              <button class="btn btn-primary btn-sm" :disabled="!isConnected" @click="syncNow">
+              <button
+                class="btn btn-primary btn-sm"
+                :disabled="!isConnected && !(isWebdavMode && syncState === 'error')"
+                @click="syncNow"
+              >
                 立即同步
               </button>
             </div>
@@ -1481,6 +1941,30 @@ onUnmounted(() => {
 
 .connection-message.success {
   color: var(--success-color, #18a058);
+}
+
+.webdav-preset-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--hover-bg);
+}
+
+.webdav-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.webdav-switch-hint-btn {
+  flex: none;
+  color: var(--primary-color);
+  border-color: var(--primary-color);
 }
 
 @media (max-width: 780px) {

@@ -74,6 +74,60 @@ export function normalizeHttpServerUrl(input: string): string {
   return parsed.origin
 }
 
+export const DEFAULT_WEBDAV_REMOTE_DIR = 'ZTools'
+
+/**
+ * 校验并规范化 WebDAV 服务器地址，保留服务端必需的子路径（如坚果云 `/dav/`）。
+ * @param input 用户填写的 HTTP 或 HTTPS WebDAV 服务地址。
+ * @returns 去除末尾多余斜杠但保留完整子路径的 WebDAV 地址。
+ * @throws 当地址为空、协议不是 http/https、包含凭据/查询参数/锚点时抛出错误。
+ */
+export function normalizeWebdavServerUrl(input: string): string {
+  const value = input.trim()
+  if (!value) throw new Error('请填写 WebDAV 服务器地址')
+
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error('WebDAV 服务器地址格式不正确')
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('WebDAV 服务器地址仅支持 http 或 https 协议')
+  }
+  if (!parsed.hostname) throw new Error('WebDAV 服务器地址缺少主机名')
+  if (parsed.username || parsed.password) {
+    throw new Error('请勿在服务器地址中包含账号或密码，请在下方表单单独填写')
+  }
+  if (parsed.search || parsed.hash) {
+    throw new Error('WebDAV 服务器地址不能包含查询参数或锚点')
+  }
+
+  const normalizedPath = parsed.pathname.replace(/\/+$/, '')
+  return `${parsed.origin}${normalizedPath}`
+}
+
+/**
+ * 校验并规范化 WebDAV 远端同步子目录，防止目录穿越并统一分隔符格式。
+ * @param input 用户配置的远端同步子目录（默认 `ZTools`）。
+ * @returns 不含首尾斜杠的相对子目录路径。
+ * @throws 当目录包含 `..` 等非法路径段时抛出错误。
+ */
+export function normalizeWebdavRemoteDir(input?: string | null): string {
+  const raw = typeof input === 'string' ? input.trim().replace(/\\+/g, '/') : ''
+  const trimmed = raw.replace(/^\/+|\/+$/g, '')
+  if (!trimmed) return DEFAULT_WEBDAV_REMOTE_DIR
+
+  const segments = trimmed.split('/').filter(Boolean)
+  for (const segment of segments) {
+    if (segment === '.' || segment === '..' || segment.includes('\0')) {
+      throw new Error('远端同步目录不能包含非法路径段')
+    }
+  }
+  return segments.join('/')
+}
+
 /**
  * 判断给定地址是否指向当前或受信任的历史 ZTools 官方同步服务。
  * @param input 待判断的同步服务器地址。

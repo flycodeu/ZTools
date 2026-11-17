@@ -1,6 +1,10 @@
 import type LmdbDatabase from '../lmdb/index'
 import type { FullChangeEntry } from './types'
-import { isOfficialSyncServerUrl, normalizeSyncServerUrl } from '../../../shared/syncServerUrl'
+import {
+  isOfficialSyncServerUrl,
+  normalizeSyncServerUrl,
+  normalizeWebdavServerUrl
+} from '../../../shared/syncServerUrl'
 
 const CHECKPOINT_KEY = '_sync_checkpoint'
 
@@ -231,12 +235,19 @@ export class SyncCheckpointStore {
   }
 
   /**
-   * 生成稳定且可作为 LMDB key 片段的服务地址标识。
-   * @param serverUrl 当前同步服务器地址。
+   * 生成稳定且可作为 LMDB key 片段的服务地址标识，兼容带子路径与目录的 WebDAV 标识。
+   * @param serverUrl 当前同步服务器地址或 WebDAV 复合作用域标识。
    * @returns URL 编码后的规范化服务器地址。
    */
   private serverIdentity(serverUrl: string): string {
+    if (serverUrl.startsWith('webdav:')) {
+      return encodeURIComponent(serverUrl.trim().replace(/\/+$/, ''))
+    }
     try {
+      const url = new URL(serverUrl)
+      if (url.pathname && url.pathname !== '/') {
+        return encodeURIComponent(normalizeWebdavServerUrl(serverUrl))
+      }
       return encodeURIComponent(normalizeSyncServerUrl(serverUrl))
     } catch {
       return encodeURIComponent(serverUrl.trim().replace(/\/+$/, '').toLowerCase())

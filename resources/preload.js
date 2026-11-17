@@ -1417,6 +1417,25 @@ window.ztools = {
      * @returns {Promise<{success: boolean, error?: string}>} 主进程注销结果
      */
     syncLogoutPrivate: async () => await electron.ipcRenderer.invoke('sync:logout-private'),
+    /**
+     * 测试 WebDAV 服务连接与认证状态，支持含子路径的服务地址。
+     * @param {{serverUrl: string, remoteDir?: string, username: string, password?: string}} params WebDAV 连接参数
+     * @returns {Promise<{success: boolean, serverUrl?: string, remoteDir?: string, error?: string}>} 连通性检测结果
+     */
+    syncTestWebdavConnection: async (params) =>
+      await electron.ipcRenderer.invoke('sync:test-webdav-connection', params),
+    /**
+     * 校验并加密保存 WebDAV 登录配置与密码。
+     * @param {{serverUrl: string, remoteDir?: string, username: string, password: string}} params WebDAV 登录参数
+     * @returns {Promise<{success: boolean, serverUrl?: string, remoteDir?: string, username?: string, error?: string}>} 保存结果
+     */
+    syncLoginWebdav: async (params) =>
+      await electron.ipcRenderer.invoke('sync:login-webdav', params),
+    /**
+     * 清除已保存的 WebDAV 密码并停止 WebDAV 同步。
+     * @returns {Promise<{success: boolean, error?: string}>} 注销结果
+     */
+    syncLogoutWebdav: async () => await electron.ipcRenderer.invoke('sync:logout-webdav'),
     syncSaveConfig: async (config) => await electron.ipcRenderer.invoke('sync:save-config', config),
     syncGetConfig: async () => await electron.ipcRenderer.invoke('sync:get-config'),
     syncGetState: async () => await electron.ipcRenderer.invoke('sync:get-state'),

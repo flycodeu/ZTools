@@ -4,7 +4,9 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import WebSocket from 'ws'
 import { SyncClient, SYNC_PREFIXES } from '../../core/sync/syncClient'
-import { SyncConfig } from '../../core/sync/types'
+import { WebDAVSyncClient } from '../../core/sync/webdavSyncClient'
+import { WebdavHttpClient } from '../../core/sync/webdavHttpClient'
+import { SyncConfig, type ISyncEngine, type SyncProvider } from '../../core/sync/types'
 import lmdbInstance, { storageManager } from '../../core/lmdb/lmdbInstance'
 import pluginDeviceAPI from '../plugin/device'
 import { defaultAccountImportService } from '../../core/storage/defaultAccountImportService'
@@ -20,15 +22,23 @@ import {
 import { onSyncCredentialsInvalidated } from '../../core/sync/syncAuthTokenService'
 import {
   clearPrivateSyncSession,
+  clearWebdavSyncSession,
   loadPrivateSyncSession,
   loadSyncProfile,
+  loadWebdavSyncSession,
   migrateLegacySyncConfig,
   resolveSyncRuntimeConfig,
   savePrivateSyncSession,
   saveSyncProfile,
+  saveWebdavSyncSession,
   type SyncProfile
 } from '../../core/sync/syncProfileService'
-import { OFFICIAL_SYNC_SERVER_URL } from '../../../shared/syncServerUrl'
+import {
+  DEFAULT_WEBDAV_REMOTE_DIR,
+  OFFICIAL_SYNC_SERVER_URL,
+  normalizeWebdavRemoteDir,
+  normalizeWebdavServerUrl
+} from '../../../shared/syncServerUrl'
 import { openAfdianCheckout, closeAfdianCheckout } from '../../core/afdianPaymentWindow'
 import officialAIService from '../../core/officialAIService.js'
 import type { PluginManager } from '../../managers/pluginManager'
@@ -37,7 +47,8 @@ import type { PluginManager } from '../../managers/pluginManager'
  * 同步 API（WebSocket 版）
  */
 export class SyncAPI {
-  private syncClient: SyncClient | null = null
+  private syncClient: ISyncEngine | null = null
+  private activeEngineProvider: SyncProvider = 'official'
   private pluginManager: PluginManager | null = null
   private mainWindow: BrowserWindow | null = null
   private lastSyncTimeSave: Promise<void> = Promise.resolve()
@@ -98,13 +109,16 @@ export class SyncAPI {
     await this.restartForCurrentDataSpace()
   }
 
-  private recreateSyncClient(): void {
+  private recreateSyncClient(provider: SyncProvider = this.activeEngineProvider): void {
     this.syncClient?.stop()
-    this.syncClient = new SyncClient(storageManager.getAccountDb())
+    this.activeEngineProvider = provider
+    const accountDb = storageManager.getAccountDb()
+    this.syncClient =
+      provider === 'webdav' ? new WebDAVSyncClient(accountDb) : new SyncClient(accountDb)
     this.bindSyncClientEvents(this.syncClient)
   }
 
-  private bindSyncClientEvents(client: SyncClient): void {
+  private bindSyncClientEvents(client: ISyncEngine): void {
     client.on('state', (state: string) => {
       this.sendStatusPatch({ state })
       if (state === 'live') {
@@ -148,8 +162,9 @@ export class SyncAPI {
    * @returns 同步客户端重建和可选启动完成后的 Promise。
    */
   private async restartForCurrentDataSpace(): Promise<void> {
-    this.recreateSyncClient()
-    const config = await this.loadConfig()
+    const profile = await loadSyncProfile()
+    this.recreateSyncClient(profile.provider)
+    const config = await resolveSyncRuntimeConfig(profile)
     if (config?.enabled) this.syncClient!.start(config)
     this.scheduleStatusChanged()
   }
@@ -240,13 +255,20 @@ export class SyncAPI {
     const config = await resolveSyncRuntimeConfig(profile)
     const officialAccount = await loadOfficialAccountSession()
     const privateSession = await loadPrivateSyncSession()
+    const webdavSession = await loadWebdavSyncSession()
     const unsyncedCount = this.syncClient?.getPendingDocumentCount(config) || 0
     const conflictCount = await this.getConflictCount()
+    const isLoggedIn =
+      profile.provider === 'webdav' ? Boolean(webdavSession?.password) : Boolean(config?.token)
     return {
-      config,
+      config: {
+        ...config,
+        // 切勿将解密后的 WebDAV 明文密码传递到渲染进程。
+        password: ''
+      },
       profile,
       state: this.syncClient?.getState() || 'disconnected',
-      loggedIn: Boolean(config?.token),
+      loggedIn: isLoggedIn,
       username: config?.username || '',
       lastSyncTime: config?.lastSyncTime || 0,
       unsyncedCount,
@@ -260,7 +282,40 @@ export class SyncAPI {
         loggedIn: Boolean(privateSession?.token),
         serverUrl: privateSession?.serverUrl || '',
         username: privateSession?.username || ''
+      },
+      webdavSession: {
+        configured: Boolean(webdavSession?.password),
+        serverUrl: webdavSession?.serverUrl || '',
+        remoteDir: webdavSession?.remoteDir || DEFAULT_WEBDAV_REMOTE_DIR,
+        username: webdavSession?.username || ''
       }
+    }
+  }
+
+  /**
+   * 清理当前 WebDAV 同步会话密码，若当前正在使用 WebDAV 则同步停止后台调度。
+   * @returns 注销操作结果；失败时包含可展示的错误信息。
+   */
+  private async logoutWebdavSession(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const profile = await loadSyncProfile()
+      if (profile.provider === 'webdav') {
+        await saveSyncProfile({
+          provider: 'webdav',
+          enabled: false,
+          serverUrl: profile.serverUrl,
+          remoteDir: profile.remoteDir,
+          syncInterval: profile.syncInterval
+        })
+        this.syncClient?.stop()
+      }
+
+      await clearWebdavSyncSession()
+      this.scheduleStatusChanged()
+      activityHeartbeatService.runNow()
+      return { success: true }
+    } catch (error: any) {
+      return { success: false, error: error.message }
     }
   }
 
@@ -540,6 +595,90 @@ export class SyncAPI {
 
     ipcMain.handle('sync:logout-private', () => this.logoutPrivateSession())
 
+    // 测试 WebDAV 连接与鉴权，支持带子路径地址（如坚果云 https://dav.jianguoyun.com/dav/）。
+    ipcMain.handle(
+      'sync:test-webdav-connection',
+      async (
+        _event,
+        params: {
+          serverUrl: string
+          remoteDir?: string
+          username: string
+          password?: string
+        }
+      ) => {
+        try {
+          const normalizedUrl = normalizeWebdavServerUrl(params.serverUrl)
+          const normalizedDir = normalizeWebdavRemoteDir(params.remoteDir)
+          let effectivePassword = params.password || ''
+          if (!effectivePassword) {
+            const saved = await loadWebdavSyncSession()
+            if (saved?.password && saved.serverUrl === normalizedUrl) {
+              effectivePassword = saved.password
+            }
+          }
+          const client = new WebdavHttpClient({
+            serverUrl: normalizedUrl,
+            remoteDir: normalizedDir,
+            username: params.username,
+            password: effectivePassword
+          })
+          await client.testConnection()
+          return {
+            success: true,
+            serverUrl: client.serverUrl,
+            remoteDir: client.remoteDir
+          }
+        } catch (error: any) {
+          return { success: false, error: error.message }
+        }
+      }
+    )
+
+    // 验证并加密保存 WebDAV 登录凭据（绝不切换本地账号数据空间）。
+    ipcMain.handle(
+      'sync:login-webdav',
+      async (
+        _event,
+        params: {
+          serverUrl: string
+          remoteDir?: string
+          username: string
+          password: string
+        }
+      ) => {
+        try {
+          const serverUrl = normalizeWebdavServerUrl(params.serverUrl)
+          const remoteDir = normalizeWebdavRemoteDir(params.remoteDir)
+          const username = params.username.trim()
+          const client = new WebdavHttpClient({
+            serverUrl,
+            remoteDir,
+            username,
+            password: params.password
+          })
+          await client.testConnection()
+
+          const session = await saveWebdavSyncSession({
+            serverUrl: client.serverUrl,
+            remoteDir: client.remoteDir,
+            username,
+            password: params.password
+          })
+          return {
+            success: true,
+            serverUrl: session.serverUrl,
+            remoteDir: session.remoteDir,
+            username: session.username
+          }
+        } catch (error: any) {
+          return { success: false, error: error.message }
+        }
+      }
+    )
+
+    ipcMain.handle('sync:logout-webdav', () => this.logoutWebdavSession())
+
     // 保存同步配置
     ipcMain.handle('sync:save-config', async (_event, config: Partial<SyncProfile>) => {
       try {
@@ -549,8 +688,11 @@ export class SyncAPI {
         })
         const nextConfig = await resolveSyncRuntimeConfig(profile)
 
-        // 同步配置只重启当前数据空间客户端，不再根据远端用户名切换本地数据库。
+        // 同步配置只重启当前数据空间客户端，协议在 WebSocket 与 WebDAV 间切换时按需重建引擎。
         this.syncClient?.stop()
+        if (profile.provider !== this.activeEngineProvider) {
+          this.recreateSyncClient(profile.provider)
+        }
         if (nextConfig.enabled) {
           this.syncClient!.start(nextConfig)
         }
@@ -596,12 +738,13 @@ export class SyncAPI {
 
     ipcMain.handle('sync:import-default-data', async () => {
       try {
-        const config = await this.loadConfig()
+        const profile = await loadSyncProfile()
+        const config = await resolveSyncRuntimeConfig(profile)
         this.syncClient?.stop()
         const result = defaultAccountImportService.importToCurrentAccount(
           storageManager.getCurrentAccountUid()
         )
-        this.recreateSyncClient()
+        this.recreateSyncClient(profile.provider)
         if (config?.enabled) {
           this.syncClient!.start(config)
         }

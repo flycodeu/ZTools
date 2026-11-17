@@ -16,7 +16,8 @@ const ACCOUNT_EXACT_KEYS = new Set([
   'ZTOOLS/web-search-engines',
   'ZTOOLS/avatar',
   'SYNC/profile',
-  'SYNC/private-session'
+  'SYNC/private-session',
+  'SYNC/webdav-session'
 ])
 
 const DEVICE_EXACT_KEYS = new Set([

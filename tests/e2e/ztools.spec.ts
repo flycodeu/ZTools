@@ -5,7 +5,7 @@ import path from 'node:path'
 
 const projectRoot = path.resolve(__dirname, '../..')
 
-test('可以启动主窗口、打开内置设置插件并截图', async ({}, testInfo) => {
+test('可以启动主窗口、打开内置设置插件并截图', async ({ browserName: _browserName }, testInfo) => {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ztools-playwright-'))
   const legacyRoot = path.join(dataRoot, 'legacy')
   const searchScreenshotPath = testInfo.outputPath('search-window.png')
@@ -35,12 +35,15 @@ test('可以启动主窗口、打开内置设置插件并截图', async ({}, tes
     const page = await electronApp.firstWindow()
     const searchInput = page.locator('.search-input')
 
-    // 等待 Vue 完成挂载，并确认测试模式确实展示了主窗口。
+    // 等待 Vue 完成挂载，并轮询确认测试模式确实展示了主窗口（ready-to-show 异步触发 showWindow）。
     await expect(searchInput).toBeVisible()
-    const isVisible = await electronApp.evaluate(({ BrowserWindow }) =>
-      BrowserWindow.getAllWindows().some((window) => window.isVisible())
-    )
-    expect(isVisible).toBe(true)
+    await expect
+      .poll(() =>
+        electronApp!.evaluate(({ BrowserWindow }) =>
+          BrowserWindow.getAllWindows().some((window) => window.isVisible())
+        )
+      )
+      .toBe(true)
 
     // 通过 Playwright Locator 驱动真实输入事件并校验渲染状态。
     await searchInput.fill('ZTools E2E 可行性验证')

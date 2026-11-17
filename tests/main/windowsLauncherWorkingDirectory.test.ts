@@ -104,10 +104,20 @@ describe('launchApp 传递工作目录 (#603)', () => {
     expect(opts.workingDirectory).toBeUndefined()
   })
 
-  it('PATH 中的裸 exe 走 shell.openPath，不进入原生启动器', async () => {
+  it('PATH 中的裸 exe 通过 Explorer 启动且不覆盖 workingDirectory，失败时回退 shell.openPath', async () => {
     await launchApp('calc.exe')
 
-    expect(mockLaunch).not.toHaveBeenCalled()
+    expect(mockLaunch).toHaveBeenCalledTimes(1)
+    const opts = mockLaunch.mock.calls[0][0]
+    expect(opts.target).toBe('calc.exe')
+    expect(opts.workingDirectory).toBeUndefined()
+    expect(mockOpenPath).not.toHaveBeenCalled()
+
+    mockLaunch.mockClear()
+    mockLaunch.mockResolvedValueOnce({ success: false, hresult: 0x80004005, stage: 'launch' })
+    await launchApp('calc.exe')
+
+    expect(mockLaunch).toHaveBeenCalledTimes(1)
     expect(mockOpenPath).toHaveBeenCalledWith('calc.exe')
   })
 })

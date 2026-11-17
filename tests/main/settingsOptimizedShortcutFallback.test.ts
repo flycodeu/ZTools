@@ -52,6 +52,9 @@ vi.mock('../../src/main/managers/proxyManager.js', () => ({ default: {} }))
 vi.mock('../../src/main/managers/windowManager.js', () => ({
   default: { captureCurrentActiveWindow: mocks.captureCurrentActiveWindow }
 }))
+vi.mock('../../src/main/core/detachedWindowManager.js', () => ({
+  default: { setCompactWindowHeader: vi.fn() }
+}))
 vi.mock('../../src/main/core/screenCapture.js', () => ({ primeScreenCaptureFrame: vi.fn() }))
 vi.mock('../../src/main/api/shared/database.js', () => ({
   default: { dbGet: vi.fn(), dbPut: vi.fn() }

@@ -1,3 +1,4 @@
+import path from 'path'
 import { describe, expect, it } from 'vitest'
 import {
   reorderProjects,
@@ -22,7 +23,7 @@ describe('pluginDevelopmentRegistry', () => {
 
     expect(installed.isDevelopment).toBe(true)
     expect(installed.main).toBe('http://localhost:8686/')
-    expect(installed.path).toBe('/workspace/demo')
+    expect(installed.path).toBe(path.resolve('/workspace/demo'))
   })
 
   it('rejects upsert when config name collides with different path', () => {
@@ -93,8 +94,9 @@ describe('pluginDevelopmentRegistry', () => {
 
     expect(result.success).toBe(true)
     const entry = result.registry.projects.demo
-    expect(entry.projectPath).toBe('/workspace/demo')
-    expect(entry.configPath).toBe('/workspace/demo/plugin.json')
+    const expectedDemoPath = path.resolve('/workspace/demo')
+    expect(entry.projectPath).toBe(expectedDemoPath)
+    expect(entry.configPath).toBe(path.join(expectedDemoPath, 'plugin.json'))
     expect(entry.status).toBe('ready')
     expect(entry.lastValidatedAt).toBe('2026-03-29T05:00:00.000Z')
     expect(entry.configSnapshot.version).toBe('1.0.0')
@@ -349,8 +351,11 @@ describe('pluginDevelopmentRegistry', () => {
     })
 
     expect(result.success).toBe(true)
-    expect(result.registry.projects.demo.projectPath).toBe('/workspace/new-demo')
-    expect(result.registry.projects.demo.configPath).toBe('/workspace/new-demo/plugin.json')
+    const expectedNewDemoPath = path.resolve('/workspace/new-demo')
+    expect(result.registry.projects.demo.projectPath).toBe(expectedNewDemoPath)
+    expect(result.registry.projects.demo.configPath).toBe(
+      path.join(expectedNewDemoPath, 'plugin.json')
+    )
     expect(result.registry.projects.demo.sortOrder).toBe(3)
     expect(result.registry.projects.demo.configSnapshot.version).toBe('2.0.0')
   })

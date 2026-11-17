@@ -81,6 +81,38 @@ class DetachedWindowManager {
   }
 
   /**
+   * 按目标内容区尺寸调整独立窗口大小，规避 Windows 无边框可缩放窗口下
+   * `setContentSize` 误将外框尺寸（含不可见拖拽边框）当作客户区尺寸导致内容被裁切。
+   * @param win 需要调整尺寸的独立窗口实例
+   * @param contentWidth 目标客户区宽度（像素）
+   * @param contentHeight 目标客户区高度（像素）
+   * @returns 无返回值
+   */
+  private resizeWindowContent(
+    win: BrowserWindow,
+    contentWidth: number,
+    contentHeight: number
+  ): void {
+    // Windows 下 frame=false 且 resizable=true 的窗口包含非客户区拖拽边框，需按实测差值换算外框尺寸。
+    if (
+      process.platform === 'win32' &&
+      typeof win.getBounds === 'function' &&
+      typeof win.setSize === 'function'
+    ) {
+      const outerBounds = win.getBounds()
+      const contentBounds = win.getContentBounds()
+      const frameWidth = Math.max(0, outerBounds.width - contentBounds.width)
+      const frameHeight = Math.max(0, outerBounds.height - contentBounds.height)
+      if (frameWidth > 0 || frameHeight > 0) {
+        win.setSize(contentWidth + frameWidth, contentHeight + frameHeight)
+        return
+      }
+    }
+
+    win.setContentSize(contentWidth, contentHeight)
+  }
+
+  /**
    * 更新所有分离插件窗口的标题栏密度，并保持插件正文高度不变。
    * @param enabled 是否启用紧凑顶部栏。
    * @returns 无返回值。
@@ -104,7 +136,7 @@ class DetachedWindowManager {
         info.window.setWindowButtonPosition(this.resolveTrafficLightPosition(titlebarHeight))
       }
       info.window.setMinimumSize(WINDOW_WIDTH, titlebarHeight)
-      info.window.setContentSize(windowBounds.width, viewBounds.height + titlebarHeight)
+      this.resizeWindowContent(info.window, windowBounds.width, viewBounds.height + titlebarHeight)
       info.view.setBounds({
         x: 0,
         y: titlebarHeight,
@@ -667,7 +699,7 @@ class DetachedWindowManager {
         width: bounds.width,
         height: 0
       })
-      info.window.setContentSize(bounds.width, titlebarHeight)
+      this.resizeWindowContent(info.window, bounds.width, titlebarHeight)
       return snapshot
     }
 
@@ -693,7 +725,7 @@ class DetachedWindowManager {
     // 恢复前解除持久化抑制，让原始尺寸继续作为用户窗口尺寸保存。
     this.suppressedSizePersistenceWindows.delete(snapshot.windowId)
     const titlebarHeight = this.getTitlebarHeight()
-    info.window.setContentSize(snapshot.width, snapshot.viewHeight + titlebarHeight)
+    this.resizeWindowContent(info.window, snapshot.width, snapshot.viewHeight + titlebarHeight)
     info.view.setBounds({
       x: 0,
       y: titlebarHeight,
@@ -815,7 +847,7 @@ class DetachedWindowManager {
         const newWindowHeight = height + titlebarHeight
 
         // 调整窗口大小
-        info.window.setContentSize(bounds.width, newWindowHeight)
+        this.resizeWindowContent(info.window, bounds.width, newWindowHeight)
 
         // 调整插件视图大小
         info.view.setBounds({

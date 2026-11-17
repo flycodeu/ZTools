@@ -13,6 +13,7 @@ export default defineConfig({
     __ZTOOLS_OFFICIAL_SYNC_SERVER_URL__: JSON.stringify(officialSyncServerUrl)
   },
   server: {
+    host: '127.0.0.1',
     port: 5177, // 设置插件开发服务器端口（避免与主程序 5173 冲突）
     strictPort: true,
     open: false

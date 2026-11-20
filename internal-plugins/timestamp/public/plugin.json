@@ -1,0 +1,27 @@
+{
+  "$schema": "../../../ztools-api-types/resource/ztools.schema.json",
+  "name": "timestamp",
+  "title": "时间戳",
+  "description": "日期时间转换、时间戳计算与时长运算",
+  "author": "ZTools",
+  "version": "1.0.0",
+  "main": "index.html",
+  "logo": "clock.png",
+  "features": [
+    {
+      "code": "timestamp",
+      "explain": "日期与时间戳转换、时间间隔计算",
+      "icon": "clock.svg",
+      "cmds": [
+        "时间戳",
+        "时间戳计算",
+        "时间计算",
+        "时间转换",
+        "日期转时间戳",
+        "时间戳转日期",
+        "Timestamp",
+        "Unix 时间"
+      ]
+    }
+  ]
+}

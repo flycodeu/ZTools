@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>时间戳</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="page-heading">
+        <div class="heading-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <circle cx="12" cy="12" r="8.25" />
+            <path d="M12 7.5v4.9l3.1 1.8" />
+          </svg>
+        </div>
+        <div>
+          <h1>时间戳</h1>
+          <p>时间换算与计算</p>
+        </div>
+      </header>
+
+      <section class="now-card" aria-label="当前时间">
+        <div>
+          <div class="eyebrow">当前时间 <span id="local-timezone"></span></div>
+          <time id="current-date" class="current-date"></time>
+        </div>
+        <div class="now-values">
+          <button class="now-value copy-value" data-copy-target="current-seconds" type="button">
+            <span class="eyebrow">秒</span><strong id="current-seconds"></strong>
+          </button>
+          <button
+            class="now-value copy-value"
+            data-copy-target="current-milliseconds"
+            type="button"
+          >
+            <span class="eyebrow">毫秒</span><strong id="current-milliseconds"></strong>
+          </button>
+        </div>
+      </section>
+
+      <nav class="tabs" aria-label="时间工具">
+        <button class="tab is-active" type="button" data-tab="convert">转换</button>
+        <button class="tab" type="button" data-tab="calculate">计算</button>
+      </nav>
+
+      <section id="convert-panel" class="tool-panel" aria-label="时间戳转换">
+        <div class="panel-heading">
+          <div>
+            <h2>时间戳转换</h2>
+            <p>日期时间按本地时区解析</p>
+          </div>
+        </div>
+        <div class="conversion-grid">
+          <section class="tool-card">
+            <label for="date-input" class="field-label">日期时间 <span>→</span> 时间戳</label>
+            <input id="date-input" type="datetime-local" step="1" />
+            <div class="result-list">
+              <button
+                class="result-row copy-value"
+                data-copy-target="date-result-seconds"
+                type="button"
+              >
+                <span>秒</span><strong id="date-result-seconds"></strong
+                ><span class="copy-hint">复制</span>
+              </button>
+              <button
+                class="result-row copy-value"
+                data-copy-target="date-result-milliseconds"
+                type="button"
+              >
+                <span>毫秒</span><strong id="date-result-milliseconds"></strong
+                ><span class="copy-hint">复制</span>
+              </button>
+            </div>
+          </section>
+          <section class="tool-card">
+            <label for="timestamp-input" class="field-label">时间戳 <span>→</span> 日期时间</label>
+            <input
+              id="timestamp-input"
+              type="text"
+              inputmode="decimal"
+              autocomplete="off"
+              placeholder="输入秒或毫秒时间戳"
+            />
+            <div class="date-output">
+              <span class="eyebrow">本地时间</span>
+              <strong id="timestamp-result-date" class="date-result">输入时间戳后显示</strong>
+              <span id="timestamp-result-utc" class="utc-result"></span>
+              <div class="date-copy-actions">
+                <button
+                  class="copy-value"
+                  data-copy-target="timestamp-result-date"
+                  type="button"
+                  disabled
+                >
+                  复制本地时间
+                </button>
+                <button
+                  class="copy-value"
+                  data-copy-target="timestamp-result-utc"
+                  type="button"
+                  disabled
+                >
+                  复制 UTC
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="calculate-panel" class="tool-panel" aria-label="时间计算" hidden>
+        <div class="panel-heading">
+          <div>
+            <h2>时间计算</h2>
+            <p>计算时间间隔，或对日期增减时长</p>
+          </div>
+        </div>
+        <div class="calculation-grid">
+          <section class="tool-card">
+            <h3>时间间隔</h3>
+            <label class="compact-field"
+              ><span>开始</span><input id="difference-start" type="datetime-local" step="1"
+            /></label>
+            <label class="compact-field"
+              ><span>结束</span><input id="difference-end" type="datetime-local" step="1"
+            /></label>
+            <div class="calculation-result">
+              <strong id="difference-human"></strong>
+              <span id="difference-total"></span>
+            </div>
+          </section>
+          <section class="tool-card">
+            <h3>时长加减</h3>
+            <label class="compact-field"
+              ><span>基准时间</span><input id="arithmetic-date" type="datetime-local" step="1"
+            /></label>
+            <div class="duration-fields" aria-label="时长">
+              <label
+                ><input id="duration-days" type="number" min="0" step="1" value="0" /><span
+                  >天</span
+                ></label
+              >
+              <label
+                ><input
+                  id="duration-hours"
+                  type="number"
+                  min="0"
+                  max="23"
+                  step="1"
+                  value="0"
+                /><span>时</span></label
+              >
+              <label
+                ><input
+                  id="duration-minutes"
+                  type="number"
+                  min="0"
+                  max="59"
+                  step="1"
+                  value="0"
+                /><span>分</span></label
+              >
+              <label
+                ><input
+                  id="duration-seconds"
+                  type="number"
+                  min="0"
+                  max="59"
+                  step="1"
+                  value="0"
+                /><span>秒</span></label
+              >
+            </div>
+            <div class="arithmetic-actions">
+              <select id="duration-operation" aria-label="时长运算">
+                <option value="add">加上</option>
+                <option value="subtract">减去</option>
+              </select>
+              <span>此时长</span>
+            </div>
+            <div class="calculation-result">
+              <strong id="arithmetic-result"></strong>
+              <button
+                class="copy-value inline-copy"
+                data-copy-target="arithmetic-result"
+                type="button"
+              >
+                复制日期时间
+              </button>
+              <button
+                class="copy-value inline-copy"
+                data-copy-target="arithmetic-timestamp"
+                type="button"
+              >
+                复制时间戳
+              </button>
+              <span id="arithmetic-timestamp" hidden></span>
+            </div>
+          </section>
+        </div>
+      </section>
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    </main>
+    <script src="./time.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
